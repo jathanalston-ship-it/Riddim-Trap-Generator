@@ -85,8 +85,17 @@ BlockGrid makeGrid(const std::vector<float>& mono, double sr) {
     }
     std::vector<size_t> order(g.starts.size());
     std::iota(order.begin(), order.end(), size_t(0));
-    std::sort(order.begin(), order.end(),
-              [&](size_t a, size_t b) { return energy[a] > energy[b]; });
+    // NaN-safe descending sort (strict weak ordering; NaN energies sort last).
+    // A raw `energy[a] > energy[b]` comparator is UB if any energy is NaN
+    // (introsort walks past the array end -> crash); callers should feed finite
+    // audio, but harden here too since this is the flagged crash site.
+    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+        double ea = energy[a], eb = energy[b];
+        bool na = std::isnan(ea), nb = std::isnan(eb);
+        if (na) return false;      // a is NaN -> never before b
+        if (nb) return true;       // b is NaN -> a before b
+        return ea > eb;
+    });
     size_t take = std::max<size_t>(1, order.size() / 4);
     g.loudTop25.assign(order.begin(), order.begin() + take);
     return g;
