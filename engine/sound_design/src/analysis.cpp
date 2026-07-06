@@ -261,6 +261,12 @@ float rate(Role role, const Features& f) {
                 {band(f.subRatio, 0.25f, 0.75f, 0.25f), 1.0f},
                 {rampUp(f.crestDb, 6.0f, 14.0f), 0.6f},
             });
+        case Role::Crash:
+            return blend({
+                {rampUp(f.brightness, 0.6f, 0.95f), 1.0f},
+                {rampDown(f.subRatio, 0.1f, 0.3f), 0.9f},
+                {rampUp(f.durationSec, 0.8f, 1.5f), 0.5f},
+            });
         default:
             return 0.5f;
     }

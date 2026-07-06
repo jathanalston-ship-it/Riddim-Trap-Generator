@@ -349,6 +349,31 @@ struct LFO {
     }
 };
 
+// ------------------------------------------------------------------ Linkwitz-Riley split
+// LR 2nd-order crossover (two cascaded Butterworth 1st-order == 2nd order, Q=0.5).
+// split() fills lo/hi; sum reconstructs (allpass-flat magnitude). Chain two for
+// a 3-band split: (lo1) | (hi1 -> lo2) | (hi2).
+struct LR2 {
+    Biquad lp, hp;
+    void set(double f, double sr) {
+        lp.setLowpass(f, 0.5, sr);
+        hp.setHighpass(f, 0.5, sr);
+    }
+    void split(float x, float& lo, float& hi) { lo = lp.process(x); hi = hp.process(x); }
+};
+
+struct Split3 {
+    LR2 low, high;
+    void set(double fLo, double fHi, double sr) { low.set(fLo, sr); high.set(fHi, sr); }
+    void split(float x, float& lo, float& mid, float& hi) {
+        float l, rest;
+        low.split(x, l, rest);
+        float m, h;
+        high.split(rest, m, h);
+        lo = l; mid = m; hi = h;
+    }
+};
+
 // ------------------------------------------------------------------ stereo widener
 inline void widen(float& l, float& r, float width) {
     float m = 0.5f * (l + r);

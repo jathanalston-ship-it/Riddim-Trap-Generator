@@ -67,22 +67,21 @@ bool finiteBuf(const StereoBuffer& b) {
     return true;
 }
 
-// ---- soft clipper: cubic knee above a linear threshold --------------------
-inline float cubicClip(float x, float thr) {
-    float a = std::fabs(x), s = x < 0 ? -1.f : 1.f;
+// ---- soft clipper: unity below `thr`, soft knee saturating to 0 dBFS ------
+// Shaves transient peaks toward full scale without lowering the ceiling, so
+// the following limiter (and the loudness conformance loop) can do their job.
+inline float softClip(float x, float thr) {
+    float a = std::fabs(x);
     if (a <= thr) return x;
+    float s = x < 0 ? -1.f : 1.f;
     float range = 1.0f - thr;
     if (range <= 1e-6f) return s * thr;
-    float u = (a - thr) / range;
-    if (u > 1.f) u = 1.f;
-    float comp = (u - u * u * u / 3.0f) * range; // slope 1 at knee, caps at range*2/3
-    return s * (thr + comp);
+    return s * (thr + range * std::tanh((a - thr) / range)); // C1-continuous, caps at 1.0
 }
 
-void softClipStage(StereoBuffer& buf, float thr, float drive) {
-    float inv = 1.0f / std::max(drive, 1e-3f);
-    for (auto& s : buf.l) s = cubicClip(s * drive, thr) * inv;
-    for (auto& s : buf.r) s = cubicClip(s * drive, thr) * inv;
+void softClipStage(StereoBuffer& buf, float thr) {
+    for (auto& s : buf.l) s = softClip(s, thr);
+    for (auto& s : buf.r) s = softClip(s, thr);
 }
 
 // ---- lookahead peak limiter (linked channels) -----------------------------
@@ -249,20 +248,23 @@ StereoBuffer masterize(const StereoBuffer& premaster, const Plan& plan,
         double r = rmsOf(base), p = base.peak();
         crestDb = float(20.0 * std::log10(std::max(p, 1e-9) / std::max(r, 1e-9)));
     }
-    const float clipThr = std::pow(10.0f, -3.0f / 20.0f);   // -3 dBFS
-    float clipDrive = std::clamp(1.0f + (crestDb - 6.0f) * 0.08f, 1.1f, 2.5f);
+    // Soft-clip threshold adapts once to crest: more crest => shave more (1-3 dB).
+    float shaveDb = std::clamp(1.0f + (crestDb - 8.0f) * 0.15f, 0.5f, 4.0f);
+    const float clipThr = std::pow(10.0f, -shaveDb / 20.0f);
 
     const float ceiling = std::pow(10.0f, -1.2f / 20.0f);   // -1.2 dBFS internal
     const double relSec = 0.080 * (145.0 / std::max(1.0, plan.bpm)); // program-scaled
     const float target = plan.masterTargetLufs;
 
-    // [6] Conformance loop.
+    // [6] Conformance loop. Seed the input gain from a loudness estimate so the
+    // clamped (+/-6 dB) refinement passes only fine-tune toward the target.
     StereoBuffer out;
-    float inGainDb = 0.0f;
+    float baseLufs = measureLufs(base, sampleRate);
+    float inGainDb = std::clamp(target - baseLufs, -24.0f, 24.0f);
     for (int pass = 0; pass < 3; ++pass) {
         out = base;
         out.applyGain(std::pow(10.0f, inGainDb / 20.0f));
-        softClipStage(out, clipThr, clipDrive);          // [4]
+        softClipStage(out, clipThr);                     // [4]
         limiterStage(out, sampleRate, ceiling, relSec);  // [5]
         float lufs = measureLufs(out, sampleRate);
         if (std::fabs(target - lufs) <= 0.7f) break;
