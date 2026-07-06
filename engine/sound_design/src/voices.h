@@ -20,6 +20,7 @@ struct Voice {
     float mod = 0.0f;       // articulation macro 0..1
     float bendSemis = 0.0f; // glide over the note
     uint64_t seed = 1;      // per-note deterministic seed
+    double syncHz = 0.0;    // tempo-synced LFO rate (beats/sec); 0 = disabled
 };
 
 // --- Factories (draw named params into recipe.p) ---
