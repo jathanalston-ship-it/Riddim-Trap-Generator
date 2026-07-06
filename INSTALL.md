@@ -14,6 +14,10 @@ date with the built-in update checker.
    **v1.0.0**), and press the green **Run workflow** button.
 4. Wait for the run to go green (~15–25 min: it builds the app, renders two
    test tracks headlessly to verify the engine, then publishes).
+
+   *Alternative triggers:* pushing a change to the `VERSION` file releases
+   exactly that version, and pushing a `vX.Y.Z` tag releases that tag —
+   same pipeline either way. (v1.0.0 was published via the `VERSION` path.)
 5. The release appears under **Releases** with two assets:
    - `RiddimTrapGenerator-win64.exe` — the app (this is also what the
      auto-updater downloads)
