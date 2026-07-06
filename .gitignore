@@ -6,3 +6,5 @@ third_party/
 *.obj
 *.exe
 CMakeUserPresets.json
+rtg_library/
+calibration.json
