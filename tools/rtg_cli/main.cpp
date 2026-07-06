@@ -4,22 +4,159 @@
 //           [--seed 42] [--energy 65] [--aggression 70] [--darkness 55]
 //           [--complexity 50] [--melody 30] [--chaos 25] [--drops 2]
 //           [--intro atmospheric|minimal|vocalchop|impact|fakeout]
-//           [--library <dir>]
+//           [--library <dir>] [--calibration <calibration.json>]
+//
+// Reference-calibration analyzer mode (analysis-only):
+//   rtg_cli --analyze-refs <folder> [--genre riddim|trap] [--calib-out <path>]
+//     Analyzes every .wav in <folder> and writes calibration.json. See
+//     docs/CALIBRATION.md.
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
+#include <vector>
+#include "rtg/decision/calibration.h"
 #include "rtg/generation/pipeline.h"
+#include "rtg/master/master_engine.h"   // measureLufs
 #include "rtg/render/wav_writer.h"
+#include "wav_reader.h"
 
 using namespace rtg;
+namespace fs = std::filesystem;
+
+namespace {
+
+float medianOf(std::vector<float> v) {
+    if (v.empty()) return 0.0f;
+    std::sort(v.begin(), v.end());
+    size_t m = v.size() / 2;
+    return (v.size() & 1) ? v[m] : 0.5f * (v[m - 1] + v[m]);
+}
+
+// Average two present profiles into the combined fallback.
+CalibrationProfile meanProfile(const CalibrationProfile& a, const CalibrationProfile& b) {
+    CalibrationProfile o;
+    o.present = true;
+    auto avg = [](float x, float y) { return 0.5f * (x + y); };
+    o.targetLufs = avg(a.targetLufs, b.targetLufs);
+    o.crestDb = avg(a.crestDb, b.crestDb);
+    for (int i = 0; i < kCalBands; ++i) o.bands[i] = avg(a.bands[i], b.bands[i]);
+    o.dropBreakContrastLu = avg(a.dropBreakContrastLu, b.dropBreakContrastLu);
+    o.spectralTiltDbPerOct = avg(a.spectralTiltDbPerOct, b.spectralTiltDbPerOct);
+    o.stereoWidth = avg(a.stereoWidth, b.stereoWidth);
+    o.refCount = a.refCount + b.refCount;
+    return o;
+}
+
+int runAnalyze(const std::string& folder, bool genreGiven, Genre genre,
+               const std::string& calibOut) {
+    std::vector<fs::path> files;
+    std::error_code ec;
+    if (!fs::exists(folder, ec)) {
+        std::printf("[rtg] --analyze-refs: folder not found: %s\n", folder.c_str());
+        return 2;
+    }
+    for (const auto& e : fs::directory_iterator(folder, ec)) {
+        if (!e.is_regular_file()) continue;
+        std::string ext = e.path().extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        if (ext == ".wav") files.push_back(e.path());
+    }
+    std::sort(files.begin(), files.end());
+    if (files.empty()) {
+        std::printf("[rtg] --analyze-refs: no .wav files in %s\n", folder.c_str());
+        return 2;
+    }
+
+    std::printf("[rtg] analyzing %d reference file(s) in %s\n", (int)files.size(), folder.c_str());
+    std::printf("%-28s %7s %6s  %5s %5s %5s %5s %5s  %6s %6s %6s\n",
+                "file", "LUFS", "crest", "sub", "loM", "mid", "hiM", "hi",
+                "contr", "tilt", "width");
+
+    std::vector<float> vLufs, vCrest, vContrast, vTilt, vWidth;
+    std::array<std::vector<float>, kCalBands> vBands;
+    int ok = 0;
+    for (const auto& p : files) {
+        StereoBuffer buf;
+        if (!readWavToStereo48k(p.string(), buf)) {
+            std::printf("%-28s  (unreadable — skipped)\n", p.filename().string().c_str());
+            continue;
+        }
+        float lufs = measureLufs(buf, kSampleRate);
+        float crest = measureCrestDb(buf, kSampleRate);
+        auto bands = measureBandShares(buf, kSampleRate);
+        float contrast = measureContrastLu(buf, kSampleRate);
+        float tilt = measureSpectralTiltDbPerOct(buf, kSampleRate);
+        float width = measureStereoWidth(buf);
+
+        vLufs.push_back(lufs); vCrest.push_back(crest); vContrast.push_back(contrast);
+        vTilt.push_back(tilt); vWidth.push_back(width);
+        for (int b = 0; b < kCalBands; ++b) vBands[b].push_back(bands[b]);
+        ++ok;
+
+        std::string name = p.filename().string();
+        if (name.size() > 27) name = name.substr(0, 27);
+        std::printf("%-28s %7.1f %6.1f  %5.2f %5.2f %5.2f %5.2f %5.2f  %6.1f %6.2f %6.2f\n",
+                    name.c_str(), lufs, crest, bands[0], bands[1], bands[2], bands[3],
+                    bands[4], contrast, tilt, width);
+    }
+    if (ok == 0) { std::printf("[rtg] no readable references — nothing written\n"); return 3; }
+
+    // Aggregate = median per field.
+    CalibrationProfile prof;
+    prof.present = true;
+    prof.refCount = ok;
+    prof.targetLufs = medianOf(vLufs);
+    prof.crestDb = medianOf(vCrest);
+    prof.dropBreakContrastLu = medianOf(vContrast);
+    prof.spectralTiltDbPerOct = medianOf(vTilt);
+    prof.stereoWidth = medianOf(vWidth);
+    { float s = 0.0f;
+      for (int b = 0; b < kCalBands; ++b) { prof.bands[b] = medianOf(vBands[b]); s += prof.bands[b]; }
+      if (s > 1e-6f) for (int b = 0; b < kCalBands; ++b) prof.bands[b] /= s; }  // re-normalize
+
+    std::printf("[rtg] aggregate (median of %d): LUFS=%.1f crest=%.1f bands=[%.2f %.2f %.2f %.2f %.2f] "
+                "contrast=%.1f tilt=%.2f width=%.2f\n",
+                ok, prof.targetLufs, prof.crestDb, prof.bands[0], prof.bands[1], prof.bands[2],
+                prof.bands[3], prof.bands[4], prof.dropBreakContrastLu, prof.spectralTiltDbPerOct,
+                prof.stereoWidth);
+
+    // Merge into existing calibration (preserve the other genre if present).
+    Calibration cal;
+    cal.loadFromFile(calibOut);   // tolerant: ignored if missing
+    if (genreGiven) {
+        cal.perGenre = true;
+        (genre == Genre::Trap ? cal.trap : cal.riddim) = prof;
+        // Recompute combined fallback from whatever genres are present.
+        if (cal.riddim.present && cal.trap.present) cal.combined = meanProfile(cal.riddim, cal.trap);
+        else cal.combined = prof;
+    } else {
+        cal.combined = prof;      // no genre split
+    }
+
+    if (!cal.saveToFile(calibOut)) {
+        std::printf("[rtg] ERROR: could not write %s\n", calibOut.c_str());
+        return 4;
+    }
+    std::printf("[rtg] wrote %s (%s)\n", calibOut.c_str(),
+                genreGiven ? genreName(genre) : "combined");
+    return 0;
+}
+
+} // namespace
 
 int main(int argc, char** argv) {
     Params params;
     std::string out = "rtg_track.wav";
     std::string libDir = "rtg_library";
+    std::string analyzeRefs, calibOut, calibrationIn;
+    bool genreGiven = false;
+    bool libGiven = false;
 
     auto arg = [&](int& i) -> std::string {
         return (i + 1 < argc) ? std::string(argv[++i]) : std::string();
@@ -27,8 +164,11 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--out") out = arg(i);
-        else if (a == "--library") libDir = arg(i);
-        else if (a == "--genre") params.genre = (arg(i) == "trap") ? Genre::Trap : Genre::Riddim;
+        else if (a == "--library") { libDir = arg(i); libGiven = true; }
+        else if (a == "--analyze-refs") analyzeRefs = arg(i);
+        else if (a == "--calib-out") calibOut = arg(i);
+        else if (a == "--calibration") calibrationIn = arg(i);
+        else if (a == "--genre") { params.genre = (arg(i) == "trap") ? Genre::Trap : Genre::Riddim; genreGiven = true; }
         else if (a == "--bpm") params.bpm = std::atof(arg(i).c_str());
         else if (a == "--seconds") params.lengthSec = std::atof(arg(i).c_str());
         else if (a == "--seed") params.seed = std::strtoull(arg(i).c_str(), nullptr, 10);
@@ -48,10 +188,34 @@ int main(int argc, char** argv) {
                               : IntroStyle::Atmospheric;
         }
     }
+
+    // ---- Reference-calibration analyzer mode -------------------------------
+    if (!analyzeRefs.empty()) {
+        std::string dest = !calibOut.empty() ? calibOut
+                         : libGiven ? (fs::path(libDir) / "calibration.json").string()
+                         : std::string("calibration.json");
+        return runAnalyze(analyzeRefs, genreGiven, params.genre, dest);
+    }
+
+    // ---- Generation mode --------------------------------------------------
     if (params.seed == 0) params.seed = 1;
 
     SoundLibrary library(libDir);
-    library.load();
+    library.load();   // also auto-loads <libDir>/calibration.json if present
+    // Explicit --calibration overrides the library's auto-loaded calibration.
+    if (!calibrationIn.empty()) {
+        Calibration cal;
+        if (cal.loadFromFile(calibrationIn)) {
+            Calibration::setActive(std::move(cal));
+            std::printf("[rtg] calibration: loaded %s\n", calibrationIn.c_str());
+        } else {
+            std::printf("[rtg] WARNING: could not load calibration %s\n", calibrationIn.c_str());
+        }
+    }
+    if (Calibration::active()) {
+        const CalibrationProfile& p = Calibration::active()->forGenre(params.genre);
+        std::printf("[rtg] calibration active: target LUFS=%.1f (%d refs)\n", p.targetLufs, p.refCount);
+    }
     std::printf("[rtg] library: %d sounds in %s\n", (int)library.all().size(), libDir.c_str());
     std::printf("[rtg] generating: %s %.0f BPM, %.0fs, seed %llu\n",
                 genreName(params.genre), params.bpm, params.lengthSec,

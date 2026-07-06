@@ -8,7 +8,7 @@ using State = rtg::app::UpdateChecker::State;
 // Left rail nav button — simple Path glyphs, accent when selected.
 class MainComponent::NavButton : public juce::Button {
 public:
-    enum class Glyph { Generate, Library, Settings };
+    enum class Glyph { Generate, Train, Library, Settings };
     NavButton(const juce::String& name, Glyph glyph) : juce::Button(name), glyph_(glyph) {}
 
     void paintButton(juce::Graphics& g, bool highlighted, bool) override {
@@ -33,6 +33,13 @@ public:
                     p.addRoundedRectangle(icon.getX() + i * 5.0f, icon.getCentreY() - h / 2, 2.4f, h, 1.0f);
                 }
                 break;
+            case Glyph::Train: { // two opposed bars (an A/B scale)
+                p.addRoundedRectangle(icon.getX() + 2.0f, icon.getY() + 3.0f, 20.0f, 6.0f, 2.0f);
+                p.addRoundedRectangle(icon.getX() + 2.0f, icon.getBottom() - 9.0f, 20.0f, 6.0f, 2.0f);
+                p.addEllipse(icon.getX() + 4.0f, icon.getY() + 2.0f, 8.0f, 8.0f);
+                p.addEllipse(icon.getRight() - 12.0f, icon.getBottom() - 10.0f, 8.0f, 8.0f);
+                break;
+            }
             case Glyph::Library: // stacked rows
                 for (int i = 0; i < 3; ++i)
                     p.addRoundedRectangle(icon.getX(), icon.getY() + i * 8.0f, 24.0f, 4.0f, 1.5f);
@@ -113,25 +120,28 @@ private:
 MainComponent::MainComponent() {
     setLookAndFeel(&lookAndFeel_);
 
-    const char* names[3] = { "Generate", "Library", "Settings" };
-    NavButton::Glyph glyphs[3] = { NavButton::Glyph::Generate, NavButton::Glyph::Library,
-                                   NavButton::Glyph::Settings };
-    for (int i = 0; i < 3; ++i) {
+    const char* names[kNumPages] = { "Generate", "Train", "Library", "Settings" };
+    NavButton::Glyph glyphs[kNumPages] = { NavButton::Glyph::Generate, NavButton::Glyph::Train,
+                                           NavButton::Glyph::Library, NavButton::Glyph::Settings };
+    for (int i = 0; i < kNumPages; ++i) {
         navButtons_[i] = std::make_unique<NavButton>(names[i], glyphs[i]);
         navButtons_[i]->onClick = [this, i] { showPage(i); };
         addAndMakeVisible(*navButtons_[i]);
     }
 
     generatePage_ = std::make_unique<GeneratePage>(controller_);
+    trainPage_ = std::make_unique<TrainPage>(controller_);
     libraryPage_ = std::make_unique<LibraryPage>(controller_);
     settingsPage_ = std::make_unique<SettingsPage>(controller_, updater_);
     transport_ = std::make_unique<TransportBar>(controller_);
     banner_ = std::make_unique<UpdateBanner>(updater_);
 
     generatePage_->onGenreChanged = [this](rtg::Genre g) { updateAccent(g); };
+    trainPage_->onGenreChanged = [this](rtg::Genre g) { updateAccent(g); };
     banner_->onDismiss = [this] { bannerDismissed_ = true; resized(); };
 
     addChildComponent(*generatePage_);
+    addChildComponent(*trainPage_);
     addChildComponent(*libraryPage_);
     addChildComponent(*settingsPage_);
     addAndMakeVisible(*transport_);
@@ -158,15 +168,17 @@ void MainComponent::updateAccent(rtg::Genre g) {
     if (banner_) banner_->repaint();
     if (transport_) transport_->repaint();
     if (generatePage_) generatePage_->repaint();
+    if (trainPage_) trainPage_->repaint();
 }
 
 void MainComponent::showPage(int index) {
     currentPage_ = index;
-    for (int i = 0; i < 3; ++i)
+    for (int i = 0; i < kNumPages; ++i)
         navButtons_[i]->setToggleState(i == index, juce::dontSendNotification);
     generatePage_->setVisible(index == 0);
-    libraryPage_->setVisible(index == 1);
-    settingsPage_->setVisible(index == 2);
+    trainPage_->setVisible(index == 1);
+    libraryPage_->setVisible(index == 2);
+    settingsPage_->setVisible(index == 3);
     for (auto& b : navButtons_) if (b) b->repaint();
 }
 
@@ -208,6 +220,7 @@ void MainComponent::resized() {
         banner_->setBounds(area.removeFromTop(28));
 
     generatePage_->setBounds(area);
+    trainPage_->setBounds(area);
     libraryPage_->setBounds(area);
     settingsPage_->setBounds(area);
 }

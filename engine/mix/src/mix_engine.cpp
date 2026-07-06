@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "rtg/master/master_engine.h"   // measureTruePeakDb (defined in master_engine.cpp)
+#include "rtg/decision/calibration.h"    // reference-calibration band correction
 #include "mix_dsp.h"
 
 namespace rtg {
@@ -65,6 +66,45 @@ void applyEnv(StereoBuffer& b, const std::vector<float>& env) {
 
 void forceMono(StereoBuffer& b) {
     for (size_t i = 0; i < b.size(); ++i) { float m = 0.5f * (b.l[i] + b.r[i]); b.l[i] = m; b.r[i] = m; }
+}
+
+// RBJ peaking EQ (used only by the reference-calibration band correction).
+Biquad makePeaking(double fs, double f0, double gainDb, double Q = 1.0) {
+    Biquad bq;
+    f0 = std::min(std::max(f0, 10.0), fs * 0.49);
+    double A = std::pow(10.0, gainDb / 40.0);
+    double w0 = 2 * kPi * f0 / fs, c = std::cos(w0), s = std::sin(w0);
+    double alpha = s / (2 * Q);
+    bq.setCoeffs(1 + alpha * A, -2 * c, 1 - alpha * A,
+                 1 + alpha / A, -2 * c, 1 - alpha / A);
+    return bq;
+}
+
+// One deterministic corrective pass toward the reference band shares. Compares
+// the summed mix's own loudest-25% band shares against the calibration and
+// applies clamped (+/-2.5 dB) shelf/peak trims so the mix matches the tonal
+// balance of the reference material. No iteration — a single gentle nudge.
+void applyCalibrationBandCorrection(StereoBuffer& mix, double sr, Genre genre) {
+    const auto& cal = Calibration::active();
+    if (!cal) return;
+    const CalibrationProfile& prof = cal->forGenre(genre);
+    if (!prof.present) return;
+
+    std::array<float, kCalBands> mine = measureBandShares(mix, sr);
+    // Center frequencies for the 5 correction filters (Hz).
+    const double fc[kCalBands] = { 120.0, 250.0, 1000.0, 3500.0, 6000.0 };
+    for (int b = 0; b < kCalBands; ++b) {
+        float target = prof.bands[b];
+        float have = std::max(mine[b], 1e-6f);
+        // Energy ratio in dB, applied at half strength, clamped to +/-2.5 dB.
+        float trimDb = std::clamp(5.0f * std::log10(std::max(target, 1e-6f) / have),
+                                  -2.5f, 2.5f);
+        if (std::fabs(trimDb) < 0.05f) continue;
+        Biquad bq = (b == 0)               ? makeLowShelf(sr, fc[0], trimDb)
+                  : (b == kCalBands - 1)   ? makeHighShelf(sr, fc[kCalBands - 1], trimDb)
+                                           : makePeaking(sr, fc[b], trimDb, 1.0);
+        applyStereo(bq, mix);
+    }
 }
 
 // Time-varying HP/LP applied in blocks; biquad state persists across blocks
@@ -274,6 +314,9 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
 
     // --- Stereo policy: mono below 120 Hz ----------------------------------
     monoBelow(mix, sr, 120.0);
+
+    // --- Reference-calibration band correction (one clamped pass) ----------
+    applyCalibrationBandCorrection(mix, sr, plan.params.genre);
 
     // --- Headroom safety: trim true peak to <= -6 dBTP ---------------------
     float tp = measureTruePeakDb(mix);

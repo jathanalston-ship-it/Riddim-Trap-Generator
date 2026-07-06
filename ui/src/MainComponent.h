@@ -12,6 +12,7 @@
 #include "pages/GeneratePage.h"
 #include "pages/LibraryPage.h"
 #include "pages/SettingsPage.h"
+#include "pages/TrainPage.h"
 
 namespace rtg::ui {
 
@@ -36,10 +37,12 @@ private:
     rtg::app::GenerationController controller_;
     rtg::app::UpdateChecker updater_;
 
-    std::array<std::unique_ptr<NavButton>, 3> navButtons_;
+    static constexpr int kNumPages = 4;
+    std::array<std::unique_ptr<NavButton>, kNumPages> navButtons_;
     int currentPage_ = 0;
 
     std::unique_ptr<GeneratePage> generatePage_;
+    std::unique_ptr<TrainPage> trainPage_;
     std::unique_ptr<LibraryPage> libraryPage_;
     std::unique_ptr<SettingsPage> settingsPage_;
     std::unique_ptr<TransportBar> transport_;

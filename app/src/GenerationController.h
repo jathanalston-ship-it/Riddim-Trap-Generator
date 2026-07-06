@@ -44,6 +44,24 @@ public:
     /// Renders a recipe preview and plays it (Library page audition).
     void auditionSound(const rtg::RatedSound& sound);
 
+    // --- A/B Preference Trainer -------------------------------------------
+    // Background-renders two short bass-drop loop candidates for the given
+    // genre; poll trainPairReady()/isTrainRendering() and observe via the
+    // ChangeBroadcaster. Reuses the preview transport for playback.
+    void startTrainingPair(rtg::Genre genre);
+    bool trainPairReady() const;       // both candidates rendered & ready
+    bool isTrainRendering() const;     // a pair is currently rendering
+    void playTrainA();                 // (re)play candidate A
+    void playTrainB();                 // (re)play candidate B
+    void replayLastTrain();            // replay whichever was last played (A default)
+    /// Record a vote (0 = A better, 1 = B better): appends an anonymous vote
+    /// then immediately starts rendering the next pair (continuous flow).
+    void voteTrain(int choice);
+    /// Load votes, train the model, save weights. Returns trainedOn count.
+    int trainNow();
+    int voteCount() const;             // total anonymous votes recorded locally
+    int modelTrainedOn() const;        // trainedOn from saved weights (0 if none)
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

@@ -6,9 +6,12 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <future>
+#include <string>
 #include <vector>
 
+#include "rtg/library/preference_model.h"
 #include "rtg/mix/mix_engine.h"
 #include "rtg/synth/synth_engine.h"
 #include "rtg/utils/rng.h"
@@ -27,9 +30,15 @@ PaletteSpec paletteFor(const Plan& plan) {
 }
 
 // Synthesize N candidates, rate them, return the best as a RatedSound.
+// When a trained preference model is supplied, blend its taste score into the
+// selection metric: sel = 0.65*rate + 0.35*prefModel.score(features). The
+// stored RatedSound::score stays the raw synth rating (library admission uses
+// it); only the winner-selection metric is reweighted. Deterministic.
 RatedSound synthesizeBest(Role role, const PaletteSpec& pal, const Plan& plan,
-                          const RatedSound* seedParent, Rng& rng, double sr) {
+                          const RatedSound* seedParent, Rng& rng, double sr,
+                          const PreferenceModel* prefs) {
     RatedSound best; best.score = -1.0f;
+    float bestSel = -1.0f;
     for (int k = 0; k < 6; ++k) {
         Recipe rec;
         if (k < 2 && seedParent)
@@ -38,8 +47,12 @@ RatedSound synthesizeBest(Role role, const PaletteSpec& pal, const Plan& plan,
             rec = synth::makeRecipe(role, pal.aggression01, pal.darkness01, pal.novelty01, rng);
         StereoBuffer prev = synth::renderPreview(rec, plan.rootMidi, 2.0, sr);
         Features f = synth::analyze(prev, sr);
-        float sc = synth::rate(role, f);
-        if (sc > best.score) { best = RatedSound{}; best.recipe = rec; best.features = f; best.score = sc; }
+        float rated = synth::rate(role, f);
+        float sel = prefs ? (0.65f * rated + 0.35f * prefs->score(f)) : rated;
+        if (sel > bestSel) {
+            bestSel = sel;
+            best = RatedSound{}; best.recipe = rec; best.features = f; best.score = rated;
+        }
     }
     return best;
 }
@@ -72,6 +85,20 @@ std::optional<GenerationResult> generateTrack(const Params& params,
     report(0.10f, "Choosing sounds");
     const PaletteSpec pal = paletteFor(plan);
 
+    // Optional A/B preference model. Convention: the trained weights live at
+    // <library dir>/../training/preference_weights.json (the app stores the
+    // library under <dataDir>/library and votes/weights under <dataDir>/training).
+    // Missing or invalid weights ⇒ identical behavior to before (no blend).
+    PreferenceModel prefModel;
+    bool hasPrefs = false;
+    {
+        const std::string prefsPath =
+            (std::filesystem::path(library.directory()) / ".." / "training" /
+             "preference_weights.json").string();
+        hasPrefs = prefModel.load(prefsPath);
+    }
+    const PreferenceModel* prefsPtr = hasPrefs ? &prefModel : nullptr;
+
     std::array<Recipe, kLaneCount> laneRecipe;
     std::array<bool, kLaneCount> laneActive{};
     std::vector<UsedSound> usedSounds;
@@ -99,7 +126,7 @@ std::optional<GenerationResult> generateTrack(const Params& params,
 
         if (goFresh) {
             const RatedSound* parent = picks.empty() ? nullptr : &picks.front();
-            RatedSound best = synthesizeBest(role, pal, plan, parent, soundRng, sr);
+            RatedSound best = synthesizeBest(role, pal, plan, parent, soundRng, sr, prefsPtr);
             bool ingested = library.maybeIngest(best);
             if (ingested) ++newIngested;
             laneRecipe[li] = best.recipe;

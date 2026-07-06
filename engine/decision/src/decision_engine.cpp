@@ -3,6 +3,7 @@
 // All randomness flows from Rng(params.seed).stream("decision"); no globals,
 // no time(), no rand().
 #include "rtg/decision/plan.h"
+#include "rtg/decision/calibration.h"
 #include "rtg/utils/rng.h"
 
 #include <algorithm>
@@ -167,6 +168,16 @@ Plan makePlan(const Params& params) {
     if (plan.energy01 < 0.4f) plan.masterTargetLufs -= 1.0f;  // low energy → slightly quieter master
     plan.sidechainDepth = riddim ? 0.45f : 0.7f;
     plan.mixAggression  = plan.aggression01;
+
+    // ---- Reference calibration override (analysis-only) --------------------
+    // If the user calibrated against commercial references, target the measured
+    // integrated loudness instead of the hand-tuned default. Clamped so a weird
+    // reference can never push the master into an unusable range.
+    if (const auto& cal = Calibration::active()) {
+        const CalibrationProfile& prof = cal->forGenre(params.genre);
+        if (prof.present)
+            plan.masterTargetLufs = std::clamp(prof.targetLufs, -14.0f, -6.5f);
+    }
 
     return plan;
 }

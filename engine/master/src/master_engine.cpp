@@ -2,6 +2,7 @@
 // lookahead true-peak limiter -> LUFS/TP conformance loop. Also provides the
 // shared loudness + true-peak meters (measureLufs / measureTruePeakDb).
 #include "rtg/master/master_engine.h"
+#include "rtg/decision/calibration.h"
 
 #include <algorithm>
 #include <array>
@@ -261,6 +262,15 @@ StereoBuffer masterize(const StereoBuffer& premaster, const Plan& plan,
 
     // [1] Tilt EQ. tilt = (darkness01 - 0.5)*3 spans +/-1.5; darker => warm top.
     double tilt = (double(plan.darkness01) - 0.5) * 3.0;
+    // Reference-calibration bias: nudge the tilt toward the measured spectral
+    // slope of the references. A darker (more negative dB/oct) reference warms
+    // the master. Bias is clamped to +/-2 dB of shelf adjustment total so a
+    // pathological reference cannot repaint the tonal balance.
+    if (const auto& cal = Calibration::active()) {
+        const CalibrationProfile& prof = cal->forGenre(plan.params.genre);
+        if (prof.present)
+            tilt += std::clamp(-double(prof.spectralTiltDbPerOct) * 0.35, -2.0, 2.0);
+    }
     {
         Biquad lsL = lowShelf(sampleRate, 120.0, tilt), lsR = lsL;
         Biquad hsL = highShelf(sampleRate, 6000.0, -tilt), hsR = hsL;

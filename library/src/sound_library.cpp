@@ -2,6 +2,7 @@
 // asset), role+character weighted selection, admission threshold, per-role cap
 // with weakest-non-favorite displacement, favorites, usage tracking.
 #include "rtg/library/sound_library.h"
+#include "rtg/decision/calibration.h"
 
 #include <algorithm>
 #include <cmath>
@@ -117,6 +118,19 @@ void SoundLibrary::load() {
         RatedSound s;
         if (deserialize(in, s)) sounds_.push_back(std::move(s));
         // parse failure => skip file (tolerant)
+    }
+
+    // Reference calibration: if <dir>/calibration.json exists, load it and make
+    // it the active calibration so the engines target the measured references.
+    // Headless-safe: no logging, tolerant of a missing/garbage file.
+    {
+        fs::path calPath = fs::path(dir_) / "calibration.json";
+        std::error_code cec;
+        if (fs::exists(calPath, cec)) {
+            Calibration cal;
+            if (cal.loadFromFile(calPath.string()))
+                Calibration::setActive(std::move(cal));
+        }
     }
 }
 
