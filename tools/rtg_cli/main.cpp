@@ -31,28 +31,6 @@ namespace fs = std::filesystem;
 
 namespace {
 
-float medianOf(std::vector<float> v) {
-    if (v.empty()) return 0.0f;
-    std::sort(v.begin(), v.end());
-    size_t m = v.size() / 2;
-    return (v.size() & 1) ? v[m] : 0.5f * (v[m - 1] + v[m]);
-}
-
-// Average two present profiles into the combined fallback.
-CalibrationProfile meanProfile(const CalibrationProfile& a, const CalibrationProfile& b) {
-    CalibrationProfile o;
-    o.present = true;
-    auto avg = [](float x, float y) { return 0.5f * (x + y); };
-    o.targetLufs = avg(a.targetLufs, b.targetLufs);
-    o.crestDb = avg(a.crestDb, b.crestDb);
-    for (int i = 0; i < kCalBands; ++i) o.bands[i] = avg(a.bands[i], b.bands[i]);
-    o.dropBreakContrastLu = avg(a.dropBreakContrastLu, b.dropBreakContrastLu);
-    o.spectralTiltDbPerOct = avg(a.spectralTiltDbPerOct, b.spectralTiltDbPerOct);
-    o.stereoWidth = avg(a.stereoWidth, b.stereoWidth);
-    o.refCount = a.refCount + b.refCount;
-    return o;
-}
-
 int runAnalyze(const std::string& folder, bool genreGiven, Genre genre,
                const std::string& calibOut) {
     std::vector<fs::path> files;
@@ -78,8 +56,7 @@ int runAnalyze(const std::string& folder, bool genreGiven, Genre genre,
                 "file", "LUFS", "crest", "sub", "loM", "mid", "hiM", "hi",
                 "contr", "tilt", "width");
 
-    std::vector<float> vLufs, vCrest, vContrast, vTilt, vWidth;
-    std::array<std::vector<float>, kCalBands> vBands;
+    std::vector<RefMeasurement> measurements;
     int ok = 0;
     for (const auto& p : files) {
         StereoBuffer buf;
@@ -87,38 +64,20 @@ int runAnalyze(const std::string& folder, bool genreGiven, Genre genre,
             std::printf("%-28s  (unreadable — skipped)\n", p.filename().string().c_str());
             continue;
         }
-        float lufs = measureLufs(buf, kSampleRate);
-        float crest = measureCrestDb(buf, kSampleRate);
-        auto bands = measureBandShares(buf, kSampleRate);
-        float contrast = measureContrastLu(buf, kSampleRate);
-        float tilt = measureSpectralTiltDbPerOct(buf, kSampleRate);
-        float width = measureStereoWidth(buf);
-
-        vLufs.push_back(lufs); vCrest.push_back(crest); vContrast.push_back(contrast);
-        vTilt.push_back(tilt); vWidth.push_back(width);
-        for (int b = 0; b < kCalBands; ++b) vBands[b].push_back(bands[b]);
+        RefMeasurement m = Calibration::measureReference(buf, kSampleRate);
+        measurements.push_back(m);
         ++ok;
 
         std::string name = p.filename().string();
         if (name.size() > 27) name = name.substr(0, 27);
         std::printf("%-28s %7.1f %6.1f  %5.2f %5.2f %5.2f %5.2f %5.2f  %6.1f %6.2f %6.2f\n",
-                    name.c_str(), lufs, crest, bands[0], bands[1], bands[2], bands[3],
-                    bands[4], contrast, tilt, width);
+                    name.c_str(), m.lufs, m.crestDb, m.bands[0], m.bands[1], m.bands[2],
+                    m.bands[3], m.bands[4], m.contrastLu, m.tiltDbPerOct, m.width);
     }
     if (ok == 0) { std::printf("[rtg] no readable references — nothing written\n"); return 3; }
 
-    // Aggregate = median per field.
-    CalibrationProfile prof;
-    prof.present = true;
-    prof.refCount = ok;
-    prof.targetLufs = medianOf(vLufs);
-    prof.crestDb = medianOf(vCrest);
-    prof.dropBreakContrastLu = medianOf(vContrast);
-    prof.spectralTiltDbPerOct = medianOf(vTilt);
-    prof.stereoWidth = medianOf(vWidth);
-    { float s = 0.0f;
-      for (int b = 0; b < kCalBands; ++b) { prof.bands[b] = medianOf(vBands[b]); s += prof.bands[b]; }
-      if (s > 1e-6f) for (int b = 0; b < kCalBands; ++b) prof.bands[b] /= s; }  // re-normalize
+    // Aggregate = median per field (shared with the GUI analyzer).
+    CalibrationProfile prof = Calibration::aggregate(measurements);
 
     std::printf("[rtg] aggregate (median of %d): LUFS=%.1f crest=%.1f bands=[%.2f %.2f %.2f %.2f %.2f] "
                 "contrast=%.1f tilt=%.2f width=%.2f\n",
@@ -129,15 +88,10 @@ int runAnalyze(const std::string& folder, bool genreGiven, Genre genre,
     // Merge into existing calibration (preserve the other genre if present).
     Calibration cal;
     cal.loadFromFile(calibOut);   // tolerant: ignored if missing
-    if (genreGiven) {
-        cal.perGenre = true;
-        (genre == Genre::Trap ? cal.trap : cal.riddim) = prof;
-        // Recompute combined fallback from whatever genres are present.
-        if (cal.riddim.present && cal.trap.present) cal.combined = meanProfile(cal.riddim, cal.trap);
-        else cal.combined = prof;
-    } else {
-        cal.combined = prof;      // no genre split
-    }
+    cal.assignProfile(genreGiven
+                          ? (genre == Genre::Trap ? CalibrationTarget::Trap : CalibrationTarget::Riddim)
+                          : CalibrationTarget::Combined,
+                      prof);
 
     if (!cal.saveToFile(calibOut)) {
         std::printf("[rtg] ERROR: could not write %s\n", calibOut.c_str());

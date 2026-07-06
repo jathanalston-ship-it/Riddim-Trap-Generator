@@ -1,6 +1,7 @@
 // Reference Calibration: measurement primitives, tolerant flat-JSON I/O, and
 // the process-wide active registry. Dependency-free (no JSON lib, no JUCE).
 #include "rtg/decision/calibration.h"
+#include "rtg/master/master_engine.h"   // measureLufs (integrated loudness)
 
 #include <algorithm>
 #include <cmath>
@@ -238,6 +239,87 @@ float measureStereoWidth(const StereoBuffer& audio) {
     }
     if (mid <= 1e-20) return 0.0f;
     return float(std::sqrt(side / mid));
+}
+
+// ===========================================================================
+// Shared analyzer aggregation (used by the CLI --analyze-refs and the GUI)
+// ===========================================================================
+namespace {
+
+float medianOf(std::vector<float> v) {
+    if (v.empty()) return 0.0f;
+    std::sort(v.begin(), v.end());
+    size_t m = v.size() / 2;
+    return (v.size() & 1) ? v[m] : 0.5f * (v[m - 1] + v[m]);
+}
+
+// Average two present profiles into the combined fallback.
+CalibrationProfile meanProfile(const CalibrationProfile& a, const CalibrationProfile& b) {
+    CalibrationProfile o;
+    o.present = true;
+    auto avg = [](float x, float y) { return 0.5f * (x + y); };
+    o.targetLufs = avg(a.targetLufs, b.targetLufs);
+    o.crestDb = avg(a.crestDb, b.crestDb);
+    for (int i = 0; i < kCalBands; ++i) o.bands[i] = avg(a.bands[i], b.bands[i]);
+    o.dropBreakContrastLu = avg(a.dropBreakContrastLu, b.dropBreakContrastLu);
+    o.spectralTiltDbPerOct = avg(a.spectralTiltDbPerOct, b.spectralTiltDbPerOct);
+    o.stereoWidth = avg(a.stereoWidth, b.stereoWidth);
+    o.refCount = a.refCount + b.refCount;
+    return o;
+}
+
+} // namespace
+
+RefMeasurement Calibration::measureReference(const StereoBuffer& audio48k, double sampleRate) {
+    RefMeasurement m;
+    m.lufs = measureLufs(audio48k, sampleRate);
+    m.crestDb = measureCrestDb(audio48k, sampleRate);
+    m.bands = measureBandShares(audio48k, sampleRate);
+    m.contrastLu = measureContrastLu(audio48k, sampleRate);
+    m.tiltDbPerOct = measureSpectralTiltDbPerOct(audio48k, sampleRate);
+    m.width = measureStereoWidth(audio48k);
+    return m;
+}
+
+CalibrationProfile Calibration::aggregate(const std::vector<RefMeasurement>& measurements) {
+    CalibrationProfile prof;
+    if (measurements.empty()) { prof.present = false; return prof; }
+
+    std::vector<float> vLufs, vCrest, vContrast, vTilt, vWidth;
+    std::array<std::vector<float>, kCalBands> vBands;
+    for (const auto& r : measurements) {
+        vLufs.push_back(r.lufs);
+        vCrest.push_back(r.crestDb);
+        vContrast.push_back(r.contrastLu);
+        vTilt.push_back(r.tiltDbPerOct);
+        vWidth.push_back(r.width);
+        for (int b = 0; b < kCalBands; ++b) vBands[b].push_back(r.bands[b]);
+    }
+
+    prof.present = true;
+    prof.refCount = (int) measurements.size();
+    prof.targetLufs = medianOf(vLufs);
+    prof.crestDb = medianOf(vCrest);
+    prof.dropBreakContrastLu = medianOf(vContrast);
+    prof.spectralTiltDbPerOct = medianOf(vTilt);
+    prof.stereoWidth = medianOf(vWidth);
+    float s = 0.0f;
+    for (int b = 0; b < kCalBands; ++b) { prof.bands[b] = medianOf(vBands[b]); s += prof.bands[b]; }
+    if (s > 1e-6f) for (int b = 0; b < kCalBands; ++b) prof.bands[b] /= s;   // re-normalize
+    return prof;
+}
+
+void Calibration::assignProfile(CalibrationTarget target, CalibrationProfile prof) {
+    prof.present = true;
+    if (target == CalibrationTarget::Riddim || target == CalibrationTarget::Trap) {
+        perGenre = true;
+        (target == CalibrationTarget::Trap ? trap : riddim) = prof;
+        // Recompute combined fallback from whatever genres are present.
+        if (riddim.present && trap.present) combined = meanProfile(riddim, trap);
+        else combined = prof;
+    } else {
+        combined = prof;      // combined-only (no genre split)
+    }
 }
 
 // ===========================================================================

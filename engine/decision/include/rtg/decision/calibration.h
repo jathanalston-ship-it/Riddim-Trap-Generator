@@ -14,6 +14,7 @@
 #include <array>
 #include <optional>
 #include <string>
+#include <vector>
 #include "rtg/decision/params.h"       // Genre
 #include "rtg/utils/audio.h"           // StereoBuffer
 
@@ -38,6 +39,22 @@ struct CalibrationProfile {
     int   refCount = 0;                    // number of reference files aggregated
 };
 
+// One reference file's raw measurements, before aggregation. Produced by
+// Calibration::measureReference; a vector of these is folded into a
+// CalibrationProfile by Calibration::aggregate (median per field).
+struct RefMeasurement {
+    float lufs = -8.5f;
+    float crestDb = 9.0f;
+    std::array<float, kCalBands> bands = { 0.42f, 0.20f, 0.20f, 0.11f, 0.07f };
+    float contrastLu = 6.0f;
+    float tiltDbPerOct = -3.0f;
+    float width = 0.30f;
+};
+
+// Selector for assignProfile / the analyzer: which slot a freshly aggregated
+// profile is stored into. Values match the app's genre selector.
+enum class CalibrationTarget { Riddim = 0, Trap = 1, Combined = 2 };
+
 struct Calibration {
     bool perGenre = false;                 // true when riddim/trap were split out
     CalibrationProfile riddim;
@@ -61,6 +78,22 @@ struct Calibration {
     // Process-wide active calibration. Set before generation; read during.
     static void setActive(std::optional<Calibration> c);
     static const std::optional<Calibration>& active();
+
+    // ---- Shared analyzer aggregation (used by the CLI and the GUI) ---------
+    // Measure one reference (48 kHz StereoBuffer) into raw per-file numbers.
+    static RefMeasurement measureReference(const StereoBuffer& audio48k, double sampleRate);
+
+    // Fold a set of per-file measurements into a profile (median per field,
+    // bands re-normalized to sum 1, refCount = number of measurements).
+    // Returns an absent profile (present=false) for an empty input.
+    static CalibrationProfile aggregate(const std::vector<RefMeasurement>& measurements);
+
+    // Store `prof` into the chosen slot and recompute the combined fallback,
+    // mirroring the CLI's per-genre merge: for Riddim/Trap this sets perGenre
+    // and rebuilds combined from whichever genres are present; for Combined it
+    // overwrites the combined fallback only. The other genre already in this
+    // Calibration is preserved.
+    void assignProfile(CalibrationTarget target, CalibrationProfile prof);
 };
 
 // ---------------------------------------------------------------------------
