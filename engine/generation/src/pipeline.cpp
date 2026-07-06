@@ -1,0 +1,197 @@
+// Generation Orchestrator (doc 01 4.2): Plan -> Compose -> sound selection /
+// synthesis -> Render -> Mix -> Master -> Library update, with progress
+// reporting and cooperative cancellation. Deterministic per (params, library).
+#include "rtg/generation/pipeline.h"
+
+#include <array>
+#include <chrono>
+#include <cmath>
+#include <future>
+#include <vector>
+
+#include "rtg/mix/mix_engine.h"
+#include "rtg/synth/synth_engine.h"
+#include "rtg/utils/rng.h"
+
+namespace rtg {
+
+namespace {
+
+PaletteSpec paletteFor(const Plan& plan) {
+    if (!plan.palettes.empty()) return plan.palettes[0];
+    PaletteSpec p;
+    p.aggression01 = plan.aggression01;
+    p.darkness01 = plan.darkness01;
+    p.novelty01 = 0.25f;
+    return p;
+}
+
+// Synthesize N candidates, rate them, return the best as a RatedSound.
+RatedSound synthesizeBest(Role role, const PaletteSpec& pal, const Plan& plan,
+                          const RatedSound* seedParent, Rng& rng, double sr) {
+    RatedSound best; best.score = -1.0f;
+    for (int k = 0; k < 6; ++k) {
+        Recipe rec;
+        if (k < 2 && seedParent)
+            rec = synth::mutateRecipe(seedParent->recipe, 0.3f, rng);
+        else
+            rec = synth::makeRecipe(role, pal.aggression01, pal.darkness01, pal.novelty01, rng);
+        StereoBuffer prev = synth::renderPreview(rec, plan.rootMidi, 2.0, sr);
+        Features f = synth::analyze(prev, sr);
+        float sc = synth::rate(role, f);
+        if (sc > best.score) { best = RatedSound{}; best.recipe = rec; best.features = f; best.score = sc; }
+    }
+    return best;
+}
+
+} // namespace
+
+std::optional<GenerationResult> generateTrack(const Params& params,
+                                              SoundLibrary& library,
+                                              const std::atomic<bool>& cancelFlag,
+                                              const ProgressFn& progress) {
+    const auto t0 = std::chrono::steady_clock::now();
+    const double sr = kSampleRate;
+    auto report = [&](float f, const std::string& s) { if (progress) progress(f, s); };
+    auto cancelled = [&] { return cancelFlag.load(); };
+
+    // --- [1] Plan ----------------------------------------------------------
+    report(0.02f, "Planning");
+    if (cancelled()) return std::nullopt;
+    Params p = params;
+    if (p.seed == 0) p.seed = 1;
+    Plan plan = makePlan(p);
+    const Genre genre = plan.params.genre;
+
+    // --- [2] Compose -------------------------------------------------------
+    report(0.06f, "Composing");
+    if (cancelled()) return std::nullopt;
+    Score score = compose(plan);
+
+    // --- [3] Choose sounds -------------------------------------------------
+    report(0.10f, "Choosing sounds");
+    const PaletteSpec pal = paletteFor(plan);
+
+    std::array<Recipe, kLaneCount> laneRecipe;
+    std::array<bool, kLaneCount> laneActive{};
+    std::vector<UsedSound> usedSounds;
+    int newIngested = 0;
+    std::string bassAId;                         // to keep BassB distinct from BassA
+
+    for (int li = 0; li < kLaneCount; ++li) {
+        if (cancelled()) return std::nullopt;
+        Lane lane = Lane(li);
+        if (score.notes(lane).empty()) continue;
+
+        Role role = roleForLane(lane, genre);
+        Rng soundRng = Rng(p.seed).stream("sounds", li);
+        std::vector<RatedSound> picks = library.pick(role, pal.aggression01, pal.darkness01, 3, soundRng);
+
+        // BassB must not reuse BassA's library asset.
+        if (lane == Lane::BassB && !picks.empty() && !bassAId.empty()) {
+            if (picks.front().id == bassAId) {
+                if (picks.size() > 1) std::swap(picks[0], picks[1]);
+                else picks.clear();              // force fresh synthesis below
+            }
+        }
+
+        bool goFresh = picks.empty() || soundRng.chance(pal.novelty01);
+
+        if (goFresh) {
+            const RatedSound* parent = picks.empty() ? nullptr : &picks.front();
+            RatedSound best = synthesizeBest(role, pal, plan, parent, soundRng, sr);
+            bool ingested = library.maybeIngest(best);
+            if (ingested) ++newIngested;
+            laneRecipe[li] = best.recipe;
+            laneActive[li] = true;
+            UsedSound us; us.lane = lane; us.name = best.recipe.name;
+            us.freshlySynthesized = true; us.ingested = ingested;
+            usedSounds.push_back(us);
+        } else {
+            const RatedSound& chosen = picks.front();
+            laneRecipe[li] = chosen.recipe;
+            laneActive[li] = true;
+            library.noteUsed(chosen.id);
+            UsedSound us; us.lane = lane; us.libraryId = chosen.id; us.name = chosen.recipe.name;
+            usedSounds.push_back(us);
+            if (lane == Lane::BassA) bassAId = chosen.id;
+        }
+    }
+
+    // --- [4] Render (parallel over lanes) ----------------------------------
+    if (cancelled()) return std::nullopt;
+    std::array<StereoBuffer, kLaneCount> laneAudio;
+    std::vector<int> renderLanes;
+    for (int li = 0; li < kLaneCount; ++li) if (laneActive[li]) renderLanes.push_back(li);
+
+    std::array<std::future<StereoBuffer>, kLaneCount> futures;
+    for (int li : renderLanes) {
+        futures[li] = std::async(std::launch::async, [&, li] {
+            return synth::renderLane(Lane(li), score.notes(Lane(li)), laneRecipe[li],
+                                     plan, score, sr);
+        });
+    }
+    // Collect in lane order; progress reported only from this orchestrating thread.
+    int done = 0;
+    for (int li : renderLanes) {
+        laneAudio[li] = futures[li].get();
+        ++done;
+        float frac = 0.15f + 0.55f * (float(done) / float(std::max<size_t>(1, renderLanes.size())));
+        report(frac, std::string("Rendering ") + laneName(Lane(li)));
+        if (cancelled()) return std::nullopt;
+    }
+
+    // --- [5] Mix -----------------------------------------------------------
+    report(0.78f, "Mixing");
+    if (cancelled()) return std::nullopt;
+    StereoBuffer premaster = mixDown(laneAudio, score, plan, sr);
+
+    // --- [6] Master --------------------------------------------------------
+    report(0.90f, "Mastering");
+    if (cancelled()) return std::nullopt;
+    MasterStats stats;
+    StereoBuffer master = masterize(premaster, plan, sr, &stats);
+
+    // --- [7] Finalize ------------------------------------------------------
+    report(0.97f, "Finalizing");
+    if (cancelled()) return std::nullopt;
+
+    const double spb = plan.secondsPerBeat();
+    const double beatsPerBar = plan.beatsPerBar;
+
+    GenerationResult result;
+    result.sampleRate = sr;
+    result.plan = plan;
+    result.score = score;
+    result.usedSounds = std::move(usedSounds);
+    result.stats = stats;
+    result.newSoundsIngested = newIngested;
+
+    int endBar = 0;
+    for (const Section& s : plan.sections) {
+        SectionInfo si;
+        si.type = s.type;
+        si.startSec = s.startBar * beatsPerBar * spb;
+        si.lengthSec = s.bars * beatsPerBar * spb;
+        si.energy = s.energy;
+        result.sections.push_back(si);
+        endBar = std::max(endBar, s.startBar + s.bars);
+    }
+
+    // Trim / pad to exact section end + 1.5 s tail.
+    double endSec = (endBar > 0 ? endBar : plan.totalBars) * beatsPerBar * spb + 1.5;
+    size_t target = size_t(endSec * sr);
+    if (target == 0) target = master.size();
+    StereoBuffer fitted(target);
+    size_t m = std::min(target, master.size());
+    for (size_t i = 0; i < m; ++i) { fitted.l[i] = master.l[i]; fitted.r[i] = master.r[i]; }
+    result.master = std::move(fitted);
+
+    const auto t1 = std::chrono::steady_clock::now();
+    result.renderSeconds = std::chrono::duration<double>(t1 - t0).count();
+
+    report(1.0f, "Done");
+    return result;
+}
+
+} // namespace rtg

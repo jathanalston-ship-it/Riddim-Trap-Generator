@@ -257,20 +257,22 @@ inline float envCoef(float timeSec, double sr) {
     return float(std::exp(-1.0 / (double(timeSec) * sr)));
 }
 
-// Percussive attack->decay-to-zero (exponential).
+// Percussive attack (linear, crisp) -> exponential decay-to-zero.
 struct EnvAD {
     double sr = 48000;
-    float ca = 0, cd = 0;
+    float atkInc = 1.0f, cd = 0;
     int stage = 0; // 0 idle, 1 atk, 2 dec
     float level = 0;
     void start(float atk, float dec, double s) {
-        sr = s; ca = envCoef(atk, s); cd = envCoef(dec, s);
+        sr = s;
+        atkInc = (atk <= 0.0f) ? 1.0f : float(1.0 / (double(atk) * s));
+        cd = envCoef(dec, s);
         stage = 1; level = 0;
     }
     float tick() {
         if (stage == 1) {
-            level = 1.0f + (level - 1.0f) * ca;
-            if (level >= 0.995f) { level = 1.0f; stage = 2; }
+            level += atkInc;
+            if (level >= 1.0f) { level = 1.0f; stage = 2; }
             return level;
         }
         if (stage == 2) {
