@@ -261,6 +261,24 @@ inline float shFold(float x) {
     return clampf(x, -1.0f, 1.0f);
 }
 
+// 2x-oversampled wavefolder. Folding generates strong harmonics and is very
+// aliasing-prone at 48 kHz, so we upsample x2 by linear interpolation (midpoint
+// between the previous and current input), fold each subsample with shFold, then
+// box-decimate (average the two folded subsamples) — a cheap half-band-ish AA
+// that nulls imaging at the original Nyquist. Output stays in [-1,1] (shFold
+// clamps), so the stage cannot blow up. `drive` is the pre-fold gain.
+struct FoldOS2 {
+    float prev = 0.0f;   // last input, for the interpolated subsample
+    float process(float x, float drive) {
+        float mid = 0.5f * (prev + x);   // upsampled subsample (between prev & x)
+        prev = x;
+        float f0 = shFold(mid * drive);
+        float f1 = shFold(x * drive);
+        return 0.5f * (f0 + f1);         // box decimate back to 1x
+    }
+    void reset() { prev = 0.0f; }
+};
+
 // ------------------------------------------------------------------ envelopes
 inline float envCoef(float timeSec, double sr) {
     timeSec = std::max(timeSec, 1.0e-4f);
