@@ -60,7 +60,7 @@ Recipe makeKickRecipe(float aggr, float dark, float nov, Rng& rng) {
     // an audible click (2-8 kHz share ~4-7%); this restores it. Level is
     // calibrated (kClickCal) so the rendered kick's 2-8 kHz energy share lands
     // near the profile's kickClickShare. Band-limited to <=6 kHz — no >8k fizz.
-    const float kClickCal = 5.0f;   // maps clickShare target -> layer amplitude
+    const float kClickCal = 13.0f;  // maps clickShare target -> layer amplitude
     p["clickAmt"]  = kClickCal * dp.kickClickShare * (0.85f + 0.45f * aggr);
     p["clickHz"]   = rng.rangef(3000.0f, 4200.0f);
     p["clickMs"]   = rng.rangef(0.004f, 0.008f);    // longer than a tick -> real 2-6k energy
@@ -84,7 +84,8 @@ StereoBuffer renderKick(const Recipe& rc, const Voice& v) {
     const float knockAmt = rc.get("knockAmt", 0.4f);
     const float knockMs = rc.get("knockMs", 0.025f);
     const float clickAmt = rc.get("clickAmt", 0.55f);
-    const float clickHz = rc.get("clickHz", 2600.0f);
+    const float clickHz = rc.get("clickHz", 3500.0f);
+    const float clickMs = rc.get("clickMs", 0.006f);
     const float bodyLP = rc.get("bodyLP", 3200.0f);
     const float drive = rc.get("drive", 1.3f);
     const float gain = rc.get("gain", 0.85f);
@@ -93,10 +94,11 @@ StereoBuffer renderKick(const Recipe& rc, const Voice& v) {
     EnvAD body;  body.start(0.0006f, bodyDecay, sr);
     EnvAD punch; punch.start(0.0004f, punchMs, sr);
     EnvAD knock; knock.start(0.0006f, knockMs, sr);
-    EnvAD click; click.start(0.0002f, 0.0028f, sr);
+    EnvAD click; click.start(0.0002f, clickMs, sr);
     Biquad bodyLp; bodyLp.setLowpass(bodyLP, 0.707, sr);
-    Biquad clickBp; clickBp.setBandpass(clickHz, 1.1, sr);
-    Biquad clickLp; clickLp.setLowpass(6500.0, 0.707, sr); // keep click off the top
+    Biquad clickBp; clickBp.setBandpass(clickHz, 0.9, sr);   // broad 2-6k knock
+    Biquad clickHp; clickHp.setHighpass(1800.0, 0.707, sr);  // keep click out of low band
+    Biquad clickLp; clickLp.setLowpass(6000.0, 0.707, sr);   // hard cap: no >6k fizz
     WhiteNoise noise(v.seed ^ 0x9911u);
     DCBlock dc;
     const double pdrop = std::max(0.004f, pitchMs);
@@ -121,8 +123,9 @@ StereoBuffer renderKick(const Recipe& rc, const Voice& v) {
         float be = body.tick();
         float bodyOut = bodyLp.process(float(fund) * be + float(harm) + float(kn));
         bodyOut = softGlue(bodyOut, drive);
-        // Beater click — band-limited noise burst.
-        float clk = clickLp.process(clickBp.process(noise.tick())) * click.tick() * clickAmt;
+        // Beater click/knock — 2-6 kHz band-limited noise burst.
+        float clk = clickLp.process(clickHp.process(clickBp.process(noise.tick())))
+                    * click.tick() * clickAmt;
         float mono = dc.tick(bodyOut + clk) * v.velocity * gain;
         out.l[n] = mono; out.r[n] = mono;
     }
@@ -134,18 +137,24 @@ Recipe makeSnareRecipe(float aggr, float dark, float nov, Rng& rng) {
     Recipe r; r.role = Role::Snare; r.seed = rng.next();
     r.name = dName("snare", rng);
     auto& p = r.p;
-    p["bodyHz"]    = rng.rangef(175.0f, 235.0f);
-    p["bodyDecay"] = rng.rangef(0.06f, 0.11f);
-    p["bodyMix"]   = rng.rangef(0.30f, 0.5f);
-    // Crack: hot band-pass noise 2-5 kHz, very short.
+    const auto& dp = rtg::DrumProfile::active();
+    const float body = dp.snareBodyHz;                  // ~145 Hz (refs 140-150)
+    // Body fundamental centered on the profile (was 175-235; LOWERED to match).
+    p["bodyHz"]    = rng.rangef(body * 0.95f, body * 1.07f);
+    p["bodyDecay"] = rng.rangef(0.07f, 0.13f);
+    // More TONAL: the pitched body dominates (raised mix; noise tail cut below).
+    p["bodyMix"]   = rng.rangef(0.55f, 0.80f);
+    // Crack: hot band-pass noise 2-5 kHz. Decay from the profile (kept snappy).
+    const float crackDec = dp.snareCrackDecayMs * 0.001f;  // ~0.11 s
     p["crackHz"]   = rng.rangef(2600.0f, 4200.0f) - dark * 1000.0f;
-    p["crackDecay"] = rng.rangef(0.006f, 0.014f);
+    p["crackDecay"] = clampf(rng.rangef(crackDec * 0.35f, crackDec * 0.65f), 0.02f, 0.09f);
     p["crackAmt"]  = rng.rangef(0.9f, 1.3f);
-    // Tail: HP'd noise with a falling LP.
+    // Tail: HP'd noise with a falling LP — reduced ~6 dB for a tonal, low-noise
+    // snare (was 0.35-0.55; halved so the pitched body/crack dominate).
     p["tailDecay"] = rng.rangef(0.14f, 0.30f);
     p["tailHp"]    = rng.rangef(1400.0f, 2200.0f);
     p["tailLp0"]   = rng.rangef(7000.0f, 9000.0f) - dark * 2000.0f; // start bright
-    p["tailAmt"]   = rng.rangef(0.35f, 0.55f);
+    p["tailAmt"]   = rng.rangef(0.16f, 0.28f);
     // Riddim metal: only when very aggressive, and subtle.
     p["metal"]     = aggr > 0.75f ? rng.rangef(0.12f, 0.28f) : 0.0f;
     p["gain"]      = 0.7f;
@@ -231,6 +240,9 @@ static StereoBuffer renderHat(const Recipe& rc, const Voice& v, float decay) {
     const float ring = rc.get("ring", 0.5f);
     const int partials = std::clamp(int(rc.get("partials", 6.0f)), 5, 7);
     const float gain = rc.get("gain", 0.5f);
+    // Partial base scales with the profile-driven brightness so the hat-band
+    // spectral centroid tracks the reference (~8.6-9 kHz).
+    const float partBase = rc.get("partBase", 3800.0f);
     const float mod = clampf(v.mod, 0.0f, 1.0f);
     // note.mod tilts BOTH brightness (HP cutoff) and decay length.
     const float hp = hpFreq * (0.75f + 0.5f * mod);
@@ -238,10 +250,10 @@ static StereoBuffer renderHat(const Recipe& rc, const Voice& v, float decay) {
 
     Rng prng(v.seed ^ 0x7c7cu);
     double php[7], pf[7];
-    // Inharmonic metallic partials spread across ~3-11 kHz (808-style smear).
+    // Inharmonic metallic partials spread upward from partBase (808-style smear).
     for (int i = 0; i < partials; ++i) {
         php[i] = prng.uniform();
-        pf[i] = (3200.0 + i * 1250.0) * (0.85 + prng.uniform() * 0.35);
+        pf[i] = (partBase + i * 1450.0) * (0.85 + prng.uniform() * 0.35);
     }
 
     Biquad hpfL, hpfR;
@@ -273,10 +285,14 @@ Recipe makeHatClosedRecipe(float aggr, float dark, float nov, Rng& rng) {
     Recipe r; r.role = Role::HatClosed; r.seed = rng.next();
     r.name = dName("hatc", rng);
     auto& p = r.p;
+    const auto& dp = rtg::DrumProfile::active();
+    const float dec = dp.hatDecayMs * 0.001f;                 // ~0.078 s
     p["hpFreq"] = rng.rangef(6500.0f, 9000.0f) - dark * 1500.0f;
+    p["partBase"] = dp.hatCentroidHz * rng.rangef(0.44f, 0.52f);  // centroid -> partials
     p["ring"]   = rng.rangef(0.35f, 0.6f);
     p["partials"] = float(rng.intRange(5, 7));
-    p["decay"]  = rng.rangef(0.028f, 0.06f);
+    // Closed hat: shorter than the all-hat median decay.
+    p["decay"]  = rng.rangef(dec * 0.55f, dec * 0.95f);
     p["gain"]   = 0.5f;
     return r;
 }
@@ -288,10 +304,12 @@ Recipe makeHatOpenRecipe(float aggr, float dark, float nov, Rng& rng) {
     Recipe r; r.role = Role::HatOpen; r.seed = rng.next();
     r.name = dName("hato", rng);
     auto& p = r.p;
+    const auto& dp = rtg::DrumProfile::active();
     p["hpFreq"] = rng.rangef(6500.0f, 9000.0f) - dark * 1500.0f;
+    p["partBase"] = dp.hatCentroidHz * rng.rangef(0.44f, 0.52f);
     p["ring"]   = rng.rangef(0.4f, 0.65f);
     p["partials"] = float(rng.intRange(5, 7));
-    p["decay"]  = rng.rangef(0.18f, 0.4f);
+    p["decay"]  = rng.rangef(0.18f, 0.4f);   // open hat stays long
     p["gain"]   = 0.45f;
     return r;
 }

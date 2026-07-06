@@ -4,6 +4,7 @@
 // so sections are independently stable. Same Plan => identical Score.
 #include "rtg/composition/score.h"
 #include "rtg/utils/rng.h"
+#include "rtg/drums/drum_profile.h"   // DrumProfile::active().hatDensityPerBeat
 
 #include <algorithm>
 #include <array>
@@ -102,6 +103,7 @@ struct Comp {
     void addDrums(const Section& s, Rng& r, float density, bool withSnare,
                   bool halftime, int startBar, int barCount);
     void addHats(const Section& s, Rng& r, float density, int startBar, int barCount);
+    void addRiddimHatBar(double bb, Rng& r, float energy);
     void addFill(int bar, Rng& r, float nextEnergy);
     void addSubFollow(const Section& s, int skipFirstBar);
     void addMotif(int barStart, int bars, Rng& r, bool echo);
@@ -274,15 +276,9 @@ void Comp::addHats(const Section& s, Rng& r, float density, int startBar, int ba
         double bb = bar * BPB;
 
         if (riddim) {
-            // Sparse offbeat closed hats — the "and"s.
-            for (int beat = 0; beat < 4; ++beat) {
-                if (r.chance(0.7 * (0.6 + 0.4 * density)))
-                    add(Lane::HatClosed, bb + beat + 0.5, 0.25, 42,
-                        hvel(r, 0.6f, 0.06f), 0.4f);
-            }
-            // Occasional open-hat offbeat accent.
-            if (r.chance(0.3))
-                add(Lane::HatOpen, bb + 2.5, 0.4, 46, hvel(r, 0.55f, 0.05f), 0.6f);
+            // Busy 16th-grid riddim hats, density steered by the reference
+            // profile and scaled by section energy (drops full, intros sparse).
+            addRiddimHatBar(bb, r, s.energy);
         } else {
             // Trap: 1/8 base plus roll bursts (1/16, 1/32, occasional triplet).
             for (int e = 0; e < 8; ++e) {
@@ -310,6 +306,40 @@ void Comp::addHats(const Section& s, Rng& r, float density, int startBar, int ba
             add(Lane::Perc, t, 0.2, 37, hvel(r, 0.5f, 0.06f), 0.5f);
         }
     }
+}
+
+// One bar of busy, 16th-based riddim closed hats with velocity variation and
+// occasional gaps/rolls. Target events/beat comes from the active DrumProfile
+// (~2.4-3.2 in drops), scaled down by section energy so builds/intros thin out.
+// Deterministic: draws only from the passed section stream `r`.
+void Comp::addRiddimHatBar(double bb, Rng& r, float energy) {
+    const float e = std::max(0.0f, std::min(1.0f, energy));
+    const float target = DrumProfile::active().hatDensityPerBeat;   // ~2.8
+    const float perBeat = target * (0.30f + 0.82f * e);             // drop~2.9, intro~1.6
+    const float pbase = std::max(0.0f, std::min(0.98f, perBeat / 4.0f));
+
+    for (int beat = 0; beat < 4; ++beat) {
+        // Occasional whole-beat gap for breathing room (rarer at high energy).
+        if (r.chance(0.10 * (1.2f - e))) continue;
+        // Occasional 16th roll fill on this beat (busier as energy rises).
+        const bool roll = r.chance(0.10 + 0.18 * e);
+        for (int sub = 0; sub < 4; ++sub) {
+            const int slot = beat * 4 + sub;             // 0..15
+            const double t = bb + beat + 0.25 * sub;
+            const bool isEighth = (sub % 2) == 0;
+            const bool isDown = (sub == 0);
+            float p = roll ? 1.0f : (isEighth ? pbase * 1.25f : pbase * 0.75f);
+            if (!r.chance(p)) continue;
+            // Accent downbeats and the offbeat "and"; ghost the in-betweens.
+            float base = isDown ? 0.72f : (sub == 2 ? 0.66f : 0.5f);
+            if (roll) base = 0.42f + 0.42f * (float(sub) / 3.0f);   // ramp up
+            add(Lane::HatClosed, t, 0.24, 42, hvel(r, base, 0.07f),
+                0.4f + 0.15f * float(slot & 1));
+        }
+    }
+    // Open-hat offbeat accent (kept from the classic riddim feel).
+    if (r.chance(0.25 + 0.25 * e))
+        add(Lane::HatOpen, bb + 2.5, 0.4, 46, hvel(r, 0.55f, 0.05f), 0.6f);
 }
 
 // FILL at end of an 8-bar phrase: last 2 beats of `bar`.
@@ -457,11 +487,16 @@ void Comp::composeBuild(const Section& s, int idx, Rng& r) {
             add(Lane::Kick, bb, 0.5, rootSub, hvel(r, lastTwo ? 0.7f : 0.95f, 0.05f));
 
         if (b < rollStart) {
-            // Early bars: normal halftime snare + hats.
+            // Early bars: halftime snare + hats. Riddim builds run the busy
+            // 16th hat pattern (energy-scaled); trap keeps its offbeat feel.
             add(Lane::Snare, bb + 2.0, 0.5, 38, hvel(r, 0.9f));
-            for (int beat = 0; beat < 4; ++beat)
-                if (r.chance(0.6))
-                    add(Lane::HatClosed, bb + beat + 0.5, 0.25, 42, hvel(r, 0.55f), 0.3f);
+            if (riddim) {
+                addRiddimHatBar(bb, r, s.energy);
+            } else {
+                for (int beat = 0; beat < 4; ++beat)
+                    if (r.chance(0.6))
+                        add(Lane::HatClosed, bb + beat + 0.5, 0.25, 42, hvel(r, 0.55f), 0.3f);
+            }
         } else {
             // Snare roll doubling: 1/4 -> 1/8 -> 1/16 -> 1/32 over last 4 bars.
             int stage = b - rollStart; // 0..3
