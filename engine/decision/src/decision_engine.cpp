@@ -150,7 +150,7 @@ Plan makePlan(const Params& params) {
 
     // ---- Mix / master intents ----------------------------------------------
     plan.masterTargetLufs = riddim ? -8.5f : -9.0f;
-    if (plan.energy01 < 0.4f) plan.masterTargetLufs += 1.0f;
+    if (plan.energy01 < 0.4f) plan.masterTargetLufs -= 1.0f;  // low energy → slightly quieter master
     plan.sidechainDepth = riddim ? 0.45f : 0.7f;
     plan.mixAggression  = plan.aggression01;
 
