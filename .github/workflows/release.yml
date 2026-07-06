@@ -16,6 +16,8 @@ on:
         type: choice
         default: patch
         options: [patch, minor, major]
+  push:
+    tags: ["v*"]
 
 permissions:
   contents: write
@@ -33,6 +35,14 @@ jobs:
         id: version
         shell: bash
         run: |
+          # Tag push: release exactly that version. Manual dispatch: bump.
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            next="${GITHUB_REF#refs/tags/v}"
+            echo "version=$next" >> "$GITHUB_OUTPUT"
+            echo "tag=v$next"    >> "$GITHUB_OUTPUT"
+            echo "Releasing pushed tag v$next"
+            exit 0
+          fi
           git fetch --tags --quiet
           latest=$(git tag -l 'v*' --sort=-v:refname | head -1)
           if [ -z "$latest" ]; then
