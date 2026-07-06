@@ -3,6 +3,54 @@
 
 namespace rtg::ui {
 
+namespace {
+    // Draw a fresh, strictly-positive, non-zero seed.
+    uint64_t freshSeed() {
+        uint64_t fresh = (uint64_t) juce::Random::getSystemRandom().nextInt64();
+        fresh &= 0x7fffffffffffffffULL;
+        if (fresh == 0) fresh = 1;
+        return fresh;
+    }
+}
+
+//==============================================================================
+void GeneratePage::LockButton::paintButton(juce::Graphics& g, bool highlighted, bool down) {
+    auto b = getLocalBounds().toFloat().reduced(2.0f);
+    const juce::Colour col = locked ? Colors::accentRiddim : Colors::dim;
+    g.setColour(col.withAlpha(down ? 0.6f : (highlighted ? 1.0f : 0.85f)));
+
+    const float m = juce::jmin(b.getWidth(), b.getHeight());
+    const float cx = b.getCentreX();
+    const float bodyW = m * 0.62f;
+    const float bodyH = m * 0.50f;
+    juce::Rectangle<float> body(cx - bodyW * 0.5f,
+                                b.getCentreY() - bodyH * 0.05f,
+                                bodyW, bodyH);
+
+    const float r = bodyW * 0.30f;              // shackle radius
+    const float topY = body.getY() - r * 0.9f;  // arc centre y
+    const float stroke = m * 0.10f;
+
+    // Shackle: left post + top semicircle + right post.
+    juce::Path shackle;
+    shackle.startNewSubPath(cx - r, body.getY());
+    shackle.lineTo(cx - r, topY);
+    shackle.addCentredArc(cx, topY, r, r, 0.0f,
+                          -juce::MathConstants<float>::halfPi,
+                          juce::MathConstants<float>::halfPi, false);
+    shackle.lineTo(cx + r, body.getY());
+    g.strokePath(shackle, juce::PathStrokeType(stroke,
+                 juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+    // Lock body.
+    g.fillRoundedRectangle(body, m * 0.10f);
+
+    // Keyhole.
+    g.setColour(Colors::panelBg2);
+    const float kh = bodyH * 0.28f;
+    g.fillEllipse(cx - kh * 0.5f, body.getCentreY() - kh * 0.5f, kh, kh);
+}
+
 //==============================================================================
 void GeneratePage::GenreCard::paintButton(juce::Graphics& g, bool highlighted, bool) {
     auto* lnf = dynamic_cast<RtgLookAndFeel*>(&getLookAndFeel());
@@ -79,14 +127,51 @@ GeneratePage::GeneratePage(rtg::app::GenerationController& controller)
 
     // Seed row.
     seedField_.setFont(rtgMonoFont(15.0f));
-    seedField_.setText("auto", juce::dontSendNotification);
     seedField_.setInputRestrictions(0, "0123456789autoAUTO");
     seedField_.setJustification(juce::Justification::centredLeft);
+    seedField_.setText("auto", juce::dontSendNotification);
+    styleSeedField(true); // greyed-italic: signals "not a locked value"
+    // User typing engages the lock and returns the field to normal, editable style.
+    seedField_.onTextChange = [this] {
+        if (suppressSeedNotify_) return; // programmatic update, not a user edit
+        seedLocked_ = true;
+        seedLockButton_.locked = true;
+        styleSeedField(false);
+        updateSeedHint();
+        seedLockButton_.repaint();
+    };
     addAndMakeVisible(seedField_);
+
+    // Padlock: toggles lock state. When locking, promote any greyed "last seed"
+    // to normal style so it clearly becomes the reused seed.
+    seedLockButton_.onClick = [this] {
+        seedLocked_ = !seedLocked_;
+        seedLockButton_.locked = seedLocked_;
+        if (seedLocked_) {
+            styleSeedField(false);
+        } else {
+            const juce::String t = seedField_.getText().trim();
+            if (t.isNotEmpty()) styleSeedField(true); // preview style when unlocked
+        }
+        updateSeedHint();
+        seedLockButton_.repaint();
+        repaint();
+    };
+    addAndMakeVisible(seedLockButton_);
+
+    // Dice: draw a new random positive seed; lock state unchanged.
     diceButton_.onClick = [this] {
-        seedField_.setText(juce::String(juce::Random::getSystemRandom().nextInt64() & 0x7fffffffffffffffLL));
+        setSeedDisplay(juce::String((juce::int64) freshSeed()), !seedLocked_);
     };
     addAndMakeVisible(diceButton_);
+
+    // One-line hint under the seed field.
+    seedHint_.setFont(rtgSansFont(10.0f));
+    seedHint_.setColour(juce::Label::textColourId, Colors::dim);
+    seedHint_.setJustificationType(juce::Justification::topLeft);
+    seedHint_.setBorderSize(juce::BorderSize<int>(0));
+    updateSeedHint();
+    addAndMakeVisible(seedHint_);
 
     // Centre.
     addAndMakeVisible(waveform_);
@@ -140,16 +225,48 @@ rtg::Params GeneratePage::buildParams() {
     p.dropCount  = (int) dropsStepper_.getValue();
     p.introStyle = (rtg::IntroStyle) (introCombo_.getSelectedId() - 1);
 
-    juce::String seedTxt = seedField_.getText().trim();
     uint64_t seed = 0;
-    if (!seedTxt.equalsIgnoreCase("auto") && seedTxt.isNotEmpty())
-        seed = (uint64_t) seedTxt.getLargeIntValue();
-    if (seed == 0) {
-        seed = (uint64_t) (juce::Random::getSystemRandom().nextInt64()) | 1ull;
-        seedField_.setText(juce::String((juce::int64) seed), juce::dontSendNotification);
+    if (seedLocked_) {
+        // Reuse the exact field value; if empty/auto, mint one and lock it in normal style.
+        const juce::String seedTxt = seedField_.getText().trim();
+        if (!seedTxt.equalsIgnoreCase("auto") && seedTxt.isNotEmpty())
+            seed = (uint64_t) seedTxt.getLargeIntValue();
+        if (seed == 0) {
+            seed = freshSeed();
+            setSeedDisplay(juce::String((juce::int64) seed), false); // locked → normal style
+        }
+    } else {
+        // Unlocked: always a fresh seed; show it greyed-italic as the "last seed".
+        seed = freshSeed();
+        setSeedDisplay(juce::String((juce::int64) seed), true);
     }
     p.seed = seed;
     return p;
+}
+
+//==============================================================================
+void GeneratePage::styleSeedField(bool lastSeedStyle) {
+    const juce::Colour c = lastSeedStyle ? Colors::dim : Colors::text;
+    const juce::Font f = lastSeedStyle ? rtgMonoFont(15.0f).italicised()
+                                       : rtgMonoFont(15.0f);
+    seedField_.setFont(f);
+    seedField_.applyFontToAllText(f);
+    seedField_.applyColourToAllText(c);
+    seedField_.setColour(juce::TextEditor::textColourId, c);
+}
+
+void GeneratePage::setSeedDisplay(const juce::String& text, bool lastSeedStyle) {
+    suppressSeedNotify_ = true;
+    seedField_.setText(text, juce::dontSendNotification);
+    styleSeedField(lastSeedStyle);
+    suppressSeedNotify_ = false;
+}
+
+void GeneratePage::updateSeedHint() {
+    seedHint_.setText(seedLocked_
+        ? "Locked: this seed is reused every generate."
+        : "Unlocked: new seed each generate. Lock to reuse this seed.",
+        juce::dontSendNotification);
 }
 
 void GeneratePage::onGeneratePressed() {
@@ -193,9 +310,9 @@ void GeneratePage::updateFromResult() {
     exportButton_.setVisible(hasResult);
     exportButton_.setEnabled(hasResult);
     if (hasResult) {
-        // reflect the seed actually used
-        seedField_.setText(juce::String((juce::int64) controller_.result()->plan.params.seed),
-                           juce::dontSendNotification);
+        // Reflect the seed actually used, respecting lock style; never auto-lock.
+        setSeedDisplay(juce::String((juce::int64) controller_.result()->plan.params.seed),
+                       !seedLocked_);
     }
     repaint();
 }
@@ -251,7 +368,11 @@ void GeneratePage::resized() {
         auto seedRow = l.removeFromTop(28);
         diceButton_.setBounds(seedRow.removeFromRight(32));
         seedRow.removeFromRight(6);
+        seedLockButton_.setBounds(seedRow.removeFromRight(28));
+        seedRow.removeFromRight(6);
         seedField_.setBounds(seedRow);
+        l.removeFromTop(4);
+        seedHint_.setBounds(l.removeFromTop(16));
     }
 
     // Right column.

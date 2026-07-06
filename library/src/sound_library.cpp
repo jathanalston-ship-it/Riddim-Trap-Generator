@@ -151,21 +151,34 @@ std::vector<RatedSound> SoundLibrary::pick(Role role, float aggression01, float 
     for (int i = 0; i < (int)sounds_.size(); ++i)
         if (sounds_[i].recipe.role == role) cand.push_back(i);
 
+    // Median usage among candidates for this role → rotation-penalty baseline.
+    double medianUses = 0.0;
+    if (!cand.empty()) {
+        std::vector<int> usesTmp;
+        usesTmp.reserve(cand.size());
+        for (int idx : cand) usesTmp.push_back(sounds_[idx].uses);
+        size_t mid = usesTmp.size() / 2;
+        std::nth_element(usesTmp.begin(), usesTmp.begin() + mid, usesTmp.end());
+        medianUses = double(usesTmp[mid]);
+    }
+
     std::vector<double> weight(cand.size());
     for (size_t i = 0; i < cand.size(); ++i) {
         const RatedSound& s = sounds_[cand[i]];
         double fitness = s.score
                        + 0.15 * (s.favorite ? 1.0 : 0.0)
-                       + 0.05 * std::log1p(double(s.uses))
                        - 0.50 * std::fabs(double(s.features.aggression) - aggression01)
                        - 0.35 * std::fabs(double(s.features.darkness) - darkness01);
         weight[i] = std::exp(fitness);                     // softmax basis
+        // Rotation pressure: penalize sounds used more than the median.
+        double over = std::max(0.0, double(s.uses) - medianUses);
+        weight[i] *= std::exp(-0.4 * over);
     }
 
     std::vector<RatedSound> out;
     int want = std::min(count, (int)cand.size());
     for (int n = 0; n < want; ++n) {
-        int pick = rng.pickWeighted(weight, 0.5);          // temperature 0.5, diversified
+        int pick = rng.pickWeighted(weight, 0.8);          // temperature 0.8, diversified
         if (pick < 0 || pick >= (int)cand.size()) break;
         out.push_back(sounds_[cand[pick]]);
         // sample without replacement

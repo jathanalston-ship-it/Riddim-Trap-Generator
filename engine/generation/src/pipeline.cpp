@@ -3,6 +3,7 @@
 // reporting and cooperative cancellation. Deterministic per (params, library).
 #include "rtg/generation/pipeline.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -103,7 +104,7 @@ std::optional<GenerationResult> generateTrack(const Params& params,
     std::array<bool, kLaneCount> laneActive{};
     std::vector<UsedSound> usedSounds;
     int newIngested = 0;
-    std::string bassAId;                         // to keep BassB distinct from BassA
+    std::vector<std::string> usedLibIds;         // library assets already chosen this track
 
     for (int li = 0; li < kLaneCount; ++li) {
         if (cancelled()) return std::nullopt;
@@ -114,15 +115,18 @@ std::optional<GenerationResult> generateTrack(const Params& params,
         Rng soundRng = Rng(p.seed).stream("sounds", li);
         std::vector<RatedSound> picks = library.pick(role, pal.aggression01, pal.darkness01, 3, soundRng);
 
-        // BassB must not reuse BassA's library asset.
-        if (lane == Lane::BassB && !picks.empty() && !bassAId.empty()) {
-            if (picks.front().id == bassAId) {
-                if (picks.size() > 1) std::swap(picks[0], picks[1]);
-                else picks.clear();              // force fresh synthesis below
-            }
-        }
+        // Cross-lane dedup: no lane reuses a library asset already chosen this
+        // track. If this empties picks, the goFresh path forces fresh synthesis.
+        picks.erase(std::remove_if(picks.begin(), picks.end(),
+                                   [&](const RatedSound& r) {
+                                       return std::find(usedLibIds.begin(), usedLibIds.end(),
+                                                        r.id) != usedLibIds.end();
+                                   }),
+                    picks.end());
 
-        bool goFresh = picks.empty() || soundRng.chance(pal.novelty01);
+        // Novelty floor: even at chaos 0, keep >=25% fresh-synthesis probability.
+        const float effNovelty = std::max(0.25f, pal.novelty01);
+        bool goFresh = picks.empty() || soundRng.chance(effNovelty);
 
         if (goFresh) {
             const RatedSound* parent = picks.empty() ? nullptr : &picks.front();
@@ -139,9 +143,9 @@ std::optional<GenerationResult> generateTrack(const Params& params,
             laneRecipe[li] = chosen.recipe;
             laneActive[li] = true;
             library.noteUsed(chosen.id);
+            usedLibIds.push_back(chosen.id);
             UsedSound us; us.lane = lane; us.libraryId = chosen.id; us.name = chosen.recipe.name;
             usedSounds.push_back(us);
-            if (lane == Lane::BassA) bassAId = chosen.id;
         }
     }
 

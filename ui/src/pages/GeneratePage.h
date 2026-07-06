@@ -34,11 +34,24 @@ private:
         void paintButton(juce::Graphics&, bool, bool) override;
     };
 
+    // Small self-contained padlock button drawn with juce::Path.
+    // Accent-tinted when locked, dim when unlocked.
+    struct LockButton : public juce::Button {
+        LockButton() : juce::Button("seedLock") {}
+        bool locked = false;
+        void paintButton(juce::Graphics&, bool, bool) override;
+    };
+
     void applyGenre(rtg::Genre g, bool notify);
     void onGeneratePressed();
     void onExportPressed();
     rtg::Params buildParams();
     void updateFromResult();
+
+    // Seed UX helpers.
+    void styleSeedField(bool lastSeedStyle);                       // greyed-italic vs normal
+    void setSeedDisplay(const juce::String& text, bool lastSeedStyle); // programmatic, no auto-lock
+    void updateSeedHint();
 
     rtg::app::GenerationController& controller_;
 
@@ -59,6 +72,10 @@ private:
 
     juce::TextEditor seedField_;
     juce::TextButton diceButton_ { "\xF0\x9F\x8E\xB2" };
+    LockButton seedLockButton_;
+    juce::Label seedHint_;
+    bool seedLocked_ = false;        // default UNLOCKED: fresh seed every generate
+    bool suppressSeedNotify_ = false; // guard so programmatic setText never auto-locks
 
     // Centre.
     WaveformView waveform_;

@@ -19,27 +19,53 @@ constexpr double BPB = 4.0; // beats per bar
 
 // ---------------------------------------------------------------------------
 // Bass rhythm archetypes on a 1-bar 1/8 grid (8 slots). Rests are first-class:
-// halftime feel, weighted toward space. Slot i == beat i*0.5.
+// halftime feel, weighted toward space. Slot i == beat i*0.5. Genuinely
+// distinct families so per-drop skeleton choice reshapes the groove: halftime
+// stomps, syncopated pickups, gap-heavy "silence riddim", double-time response,
+// triplet-leaning clusters.
 struct Archetype { const char* pat; double weight; };
 const Archetype kBassBank[] = {
+    // classic call/response
     { "X.X...X.", 1.4 },
     { "X...X.X.", 1.2 },
     { "X.X.X...", 1.0 },
     { "X..X..X.", 1.0 },
+    // busier / double-time response
     { "XX..X.X.", 0.8 },
     { "X.XX..X.", 0.7 },
-    { "X...XX..", 0.7 },
     { "X.X.X.X.", 0.5 },
+    { "X.XXX...", 0.55 }, // double-time cluster front
+    { "X...XX.X", 0.6 },  // double-time response tail
+    // halftime stomps (very sparse, heavy)
+    { "X.......", 0.6 },
+    { "X.....X.", 0.7 },
+    { "X......X", 0.55 },
+    // gap-heavy "silence riddim"
+    { "X...X...", 0.8 },
+    { "X..X....", 0.7 },
+    { "X....X..", 0.7 },
+    // syncopated pickups
+    { "X.X..X.X", 0.6 },
+    { "XX.X..X.", 0.55 },
+    { "X..XX.X.", 0.6 },
+    // triplet-leaning approximations on the 1/8 grid
+    { "XXX.X...", 0.5 },
+    { "X.XX.XX.", 0.45 },
 };
 constexpr int kBassBankN = int(sizeof(kBassBank) / sizeof(kBassBank[0]));
 
-// Trap 808 sparse skeletons (long notes), 1/8 grid.
+// Trap 808 skeletons (1/8 grid). Sparse-long families plus rolling and
+// glide-chain shapes; behavior (note length / gliding) is chosen per drop.
 const Archetype kEightOhEightBank[] = {
     { "X.......", 1.2 },
     { "X....X..", 1.0 },
     { "X...X...", 1.0 },
     { "X..X....", 0.8 },
     { "X.....X.", 0.7 },
+    { "X..X..X.", 0.7 },  // rolling-lean
+    { "X.X...X.", 0.6 },  // rolling-lean
+    { "X...X.X.", 0.6 },  // glide-chain friendly
+    { "X.X.X...", 0.5 },  // rolling
 };
 constexpr int kEightOhEightBankN = int(sizeof(kEightOhEightBank) / sizeof(kEightOhEightBank[0]));
 
@@ -51,10 +77,25 @@ struct Comp {
     int rootMid;   // mid-bass root (one octave above the sub)
     int rootSub;   // sub fundamental
 
+    // ---- Per-track "feel" (seeded once, so two seeds swing differently). ----
+    float humScale = 1.0f;   // velocity-jitter scale (tight ~0.6, loose ~1.5)
+    float humTime = 0.0f;    // timing-jitter amount in beats (loose grooves drift)
+    int   melodyReg = 0;     // extra register offset for motif placement
+    int   breakProg = 0;     // which break/pad chord progression (0..3)
+    bool  introRampExp = false; // intro energy ramp shape (linear vs exponential)
+
     explicit Comp(const Plan& p, Score& s)
         : plan(p), score(s),
           riddim(p.params.genre == Genre::Riddim),
-          rootMid(p.rootMidi + 12), rootSub(p.rootMidi) {}
+          rootMid(p.rootMidi + 12), rootSub(p.rootMidi) {
+        Rng f = Rng(p.params.seed).stream("composition").stream("feel");
+        const bool loose = f.chance(0.5);
+        humScale     = loose ? f.rangef(1.1f, 1.55f) : f.rangef(0.55f, 0.9f);
+        humTime      = loose ? f.rangef(0.02f, 0.055f) : f.rangef(0.0f, 0.018f);
+        melodyReg    = (f.chance(0.5) ? 0 : 12) + (f.chance(0.3) ? -12 : 0);
+        breakProg    = f.intRange(0, 3);
+        introRampExp = f.chance(0.5);
+    }
 
     void add(Lane l, double startBeat, double len, int midi,
              float vel, float mod = 0.0f, float bend = 0.0f) {
@@ -68,9 +109,15 @@ struct Comp {
         score.notes(l).push_back(n);
     }
 
-    // Humanized velocity around base.
+    // Humanized velocity around base (jitter scaled by the track's feel).
     float hvel(Rng& r, float base, float jitter = 0.08f) {
-        return std::max(0.05f, std::min(1.0f, base + r.gaussian() * jitter));
+        return std::max(0.05f, std::min(1.0f, base + r.gaussian() * jitter * humScale));
+    }
+
+    // Timing humanization: nudge an off-grid event by the track's feel amount.
+    double mt(Rng& r, double t) {
+        if (humTime <= 0.0f) return t;
+        return std::max(0.0, t + double(r.gaussian()) * double(humTime));
     }
 
     // Bass pitch helpers (semitone offsets from mid-bass root).
@@ -103,7 +150,7 @@ struct Comp {
     void addDrums(const Section& s, Rng& r, float density, bool withSnare,
                   bool halftime, int startBar, int barCount);
     void addHats(const Section& s, Rng& r, float density, int startBar, int barCount);
-    void addRiddimHatBar(double bb, Rng& r, float energy);
+    void addRiddimHatBar(double bb, Rng& r, float energy, int archetype = 0);
     void addFill(int bar, Rng& r, float nextEnergy);
     void addSubFollow(const Section& s, int skipFirstBar);
     void addMotif(int barStart, int bars, Rng& r, bool echo);
@@ -121,48 +168,66 @@ void Comp::addBass(const Section& s, Rng& r, int skipFirstBar) {
     const int bars = s.bars;
 
     if (!riddim) {
-        // ---- Trap: BassA is the 808 line; BassB sparse stabs. ----
+        // ---- Trap: BassA is the 808 line; BassB sparse stabs. Per-drop 808
+        // archetype: 0 = sparse-long, 1 = rolling-8ths, 2 = glide-chains. ----
         int skIdx = r.pickWeighted(
             [] { std::vector<double> w; for (auto& a : kEightOhEightBank) w.push_back(a.weight); return w; }(),
             0.4 + plan.chaos01);
+        const int t808mode = r.pickWeighted({1.1, 0.9, 0.8}, 1.0); // sparse / rolling / glide
         for (int b = 0; b < bars; ++b) {
             if (b < skipFirstBar) continue;
             if (s.switchAt8 && b == 16)
                 skIdx = (skIdx + 1) % kEightOhEightBankN;
-            const char* pat = kEightOhEightBank[skIdx].pat;
+            std::string pat = kEightOhEightBank[skIdx].pat;
+            if (t808mode == 1) {
+                // rolling-8ths: fill in extra onsets so the 808 drives eighths.
+                for (int slot = 0; slot < 8; ++slot)
+                    if (pat[slot] != 'X' && r.chance(0.35 + 0.25 * plan.complexity01))
+                        pat[slot] = 'X';
+            }
             int prevOff = 0;
             for (int slot = 0; slot < 8; ++slot) {
                 if (pat[slot] != 'X') continue;
-                double t = base + b * BPB + slot * 0.5;
+                double t = mt(r, base + b * BPB + slot * 0.5);
                 // root / b7 / b6 moves.
                 int off = 0;
                 double roll = r.uniform();
                 if (roll < 0.18 * plan.complexity01) off = -2;      // b7 below
                 else if (roll < 0.30 * plan.complexity01) off = -4; // b6 below
                 int midi = rootSub + off;
-                // Long 808 notes; sparse.
-                double len = r.range(0.75, 2.0);
+                // Note length by mode: sparse-long vs rolling (short) vs glide.
+                double len = (t808mode == 1) ? r.range(0.4, 0.8) : r.range(0.75, 2.0);
                 float bend = 0.0f;
-                if (off != prevOff && r.chance(0.5))
+                // glide-chains: bend into most notes; sparse: occasional slide.
+                double bendChance = (t808mode == 2) ? 0.75 : 0.5;
+                if (off != prevOff && r.chance(bendChance))
                     bend = float(r.range(-2.0, 2.0)); // tuned slide into note
+                else if (t808mode == 2 && r.chance(0.4))
+                    bend = float(r.range(-1.5, 1.5)); // glide even at pitch
                 add(Lane::BassA, t, len, midi, hvel(r, 0.95f),
                     0.4f + 0.4f * pal.aggression01, bend);
                 prevOff = off;
             }
             // BassB: sparse stab (beat 2.5-ish) occasionally.
             if (r.chance(0.25 + 0.3 * plan.complexity01)) {
-                double t = base + b * BPB + (r.chance(0.5) ? 2.5 : 3.5);
+                double t = mt(r, base + b * BPB + (r.chance(0.5) ? 2.5 : 3.5));
                 add(Lane::BassB, t, 0.35, rootMid, hvel(r, 0.7f), 0.5f);
             }
         }
         return;
     }
 
-    // ---- Riddim: A (call) / B (response) staccato, growl "talk" mod. ----
+    // ---- Riddim: A (call) / B (response) staccato, growl "talk" wobble. ----
+    // Per-drop selections: skeleton, call/response scheme, wobble rate.
     std::vector<double> w;
     for (auto& a : kBassBank) w.push_back(a.weight);
     int skIdx = r.pickWeighted(w, 0.4 + plan.chaos01);
-    // Response mutation state, refreshed every 4 bars.
+    // Call/response scheme: 0 = 2-beat swap, 1 = bar swap, 2 = AAAB phrase.
+    const int crScheme = r.pickWeighted({1.2, 1.0, 0.8}, 1.0);
+    // Wobble articulation: cycles/beat archetype 1 / 2 / 3 (weighted 40/40/20).
+    const int wIdx = r.pickWeighted({0.4, 0.4, 0.2}, 1.0);
+    const double wobCyc = (wIdx == 0) ? 1.0 : (wIdx == 1) ? 2.0 : 3.0;
+
     for (int b = 0; b < bars; ++b) {
         if (b < skipFirstBar) continue;
         if (s.switchAt8 && b == 16)
@@ -184,9 +249,14 @@ void Comp::addBass(const Section& s, Rng& r, int skipFirstBar) {
 
         for (int slot = 0; slot < 8; ++slot) {
             if (pat[slot] != 'X') continue;
-            double t = base + b * BPB + slot * 0.5;
-            // First half = call (BassA), second half = response (BassB).
-            Lane lane = (slot < 4) ? Lane::BassA : Lane::BassB;
+            double t = mt(r, base + b * BPB + slot * 0.5);
+            // Lane by call/response scheme.
+            Lane lane;
+            switch (crScheme) {
+                case 1:  lane = (b % 2 == 0) ? Lane::BassA : Lane::BassB; break; // bar swap
+                case 2:  lane = ((b % 4) == 3) ? Lane::BassB : Lane::BassA; break; // AAAB
+                default: lane = (slot < 4) ? Lane::BassA : Lane::BassB; break;   // 2-beat swap
+            }
 
             int off = 0; // root by default
             if (slot != 0 && r.chance(0.15 + 0.55 * plan.complexity01)
@@ -200,10 +270,13 @@ void Comp::addBass(const Section& s, Rng& r, int skipFirstBar) {
 
             // Staccato gate.
             double len = r.range(0.2, 0.45);
-            // Articulation ("talk"): rhythmic alternation + occasional sweep.
-            float artic = (slot % 2 == 0) ? 0.25f : 0.7f;
-            if (r.chance(0.15)) artic = 0.95f; // sweep accent
-            artic = std::min(1.0f, artic * (0.6f + 0.6f * pal.aggression01));
+            // Articulation ("talk") as a wobble LFO sampled at note onset: the
+            // per-drop cycles/beat rate reshapes the growl movement audibly.
+            const double phase = (base + b * BPB + slot * 0.5) * wobCyc;
+            float wob = 0.5f + 0.5f * float(std::sin(6.283185307179586 * phase));
+            float artic = (0.32f + 0.55f * pal.aggression01) * (0.35f + 0.65f * wob);
+            if (r.chance(0.12)) artic = 0.95f; // sweep accent
+            artic = std::min(1.0f, artic);
 
             float vel = hvel(r, (lane == Lane::BassA) ? 0.9f : 0.82f);
             add(lane, t, len, midi, vel, artic);
@@ -212,7 +285,7 @@ void Comp::addBass(const Section& s, Rng& r, int skipFirstBar) {
         // BassC: sparse accents (only if palette has a third voice).
         if (pal.bassVoices >= 3 && r.chance(0.35)) {
             int slot = 2 + r.intRange(0, 4);
-            double t = base + b * BPB + slot * 0.5;
+            double t = mt(r, base + b * BPB + slot * 0.5);
             add(Lane::BassC, t, 0.25, bassPitch(12), hvel(r, 0.6f), 0.5f);
         }
     }
@@ -271,6 +344,9 @@ void Comp::addDrums(const Section& s, Rng& r, float density, bool withSnare,
 }
 
 void Comp::addHats(const Section& s, Rng& r, float density, int startBar, int barCount) {
+    // Per-section hat archetype: 0 busy-16ths, 1 offbeat-opens, 2 roll-accents,
+    // 3 half-gap. Chosen once so the section keeps a consistent hat identity.
+    const int hatArch = r.pickWeighted({1.1, 0.9, 0.9, 0.7}, 1.0);
     for (int i = 0; i < barCount; ++i) {
         int bar = startBar + i;
         double bb = bar * BPB;
@@ -278,14 +354,21 @@ void Comp::addHats(const Section& s, Rng& r, float density, int startBar, int ba
         if (riddim) {
             // Busy 16th-grid riddim hats, density steered by the reference
             // profile and scaled by section energy (drops full, intros sparse).
-            addRiddimHatBar(bb, r, s.energy);
+            addRiddimHatBar(bb, r, s.energy, hatArch);
         } else {
-            // Trap: 1/8 base plus roll bursts (1/16, 1/32, occasional triplet).
+            // Trap: 1/8 base plus roll bursts, shaped by the section archetype.
+            const bool offbeatOpens = (hatArch == 1);
+            const bool rollAccents  = (hatArch == 2);
+            const bool halfGap      = (hatArch == 3);
+            const double rollP = (0.10 + 0.35 * density) * (rollAccents ? 1.8 : 1.0);
             for (int e = 0; e < 8; ++e) {
-                double t = bb + e * 0.5;
-                add(Lane::HatClosed, t, 0.25, 42, hvel(r, 0.6f, 0.06f), 0.3f);
+                double t = mt(r, bb + e * 0.5);
+                // half-gap: drop the closed hats on beats 1 & 3 (skeletal feel).
+                const bool inGap = halfGap && (e == 0 || e == 4);
+                if (!inGap)
+                    add(Lane::HatClosed, t, 0.25, 42, hvel(r, 0.6f, 0.06f), 0.3f);
                 // Roll burst.
-                if (r.chance(0.10 + 0.35 * density)) {
+                if (r.chance(rollP)) {
                     double roll = r.uniform();
                     double step = (roll < 0.5) ? 0.25 : (roll < 0.8 ? 0.125 : (1.0 / 3.0));
                     int n = int(0.5 / step);
@@ -296,13 +379,19 @@ void Comp::addHats(const Section& s, Rng& r, float density, int startBar, int ba
                     }
                 }
             }
-            if (r.chance(0.25))
+            // Open hats: offbeat-opens archetype scatters them across the offbeats.
+            if (offbeatOpens) {
+                for (double ob : {0.5, 1.5, 2.5, 3.5})
+                    if (r.chance(0.55))
+                        add(Lane::HatOpen, mt(r, bb + ob), 0.4, 46, hvel(r, 0.55f, 0.05f), 0.55f);
+            } else if (r.chance(0.25)) {
                 add(Lane::HatOpen, bb + 2.5, 0.4, 46, hvel(r, 0.55f, 0.05f), 0.5f);
+            }
         }
 
         // Perc / tops when the section is energetic and offbeat.
         if (s.energy > 0.6f && r.chance(0.5)) {
-            double t = bb + (r.chance(0.5) ? 1.5 : 3.5);
+            double t = mt(r, bb + (r.chance(0.5) ? 1.5 : 3.5));
             add(Lane::Perc, t, 0.2, 37, hvel(r, 0.5f, 0.06f), 0.5f);
         }
     }
@@ -312,20 +401,32 @@ void Comp::addHats(const Section& s, Rng& r, float density, int startBar, int ba
 // occasional gaps/rolls. Target events/beat comes from the active DrumProfile
 // (~2.4-3.2 in drops), scaled down by section energy so builds/intros thin out.
 // Deterministic: draws only from the passed section stream `r`.
-void Comp::addRiddimHatBar(double bb, Rng& r, float energy) {
+void Comp::addRiddimHatBar(double bb, Rng& r, float energy, int archetype) {
     const float e = std::max(0.0f, std::min(1.0f, energy));
     const float target = DrumProfile::active().hatDensityPerBeat;   // ~2.8
-    const float perBeat = target * (0.30f + 0.82f * e);             // drop~2.9, intro~1.6
+    // Archetype reshapes density and roll/open behavior:
+    //  0 busy-16ths, 1 offbeat-opens (thinner closed, richer opens),
+    //  2 roll-accents (frequent rolls), 3 half-gap (skeletal, beats breathe).
+    float densMul = 1.0f, rollBias = 0.0f, gapBias = 0.0f, openBias = 0.0f;
+    switch (archetype) {
+        case 1: densMul = 0.8f;  openBias = 0.35f; break;
+        case 2: densMul = 1.05f; rollBias = 0.22f; break;
+        case 3: densMul = 0.7f;  gapBias = 0.18f;  break;
+        default: break;
+    }
+    const float perBeat = target * densMul * (0.30f + 0.82f * e);
     const float pbase = std::max(0.0f, std::min(0.98f, perBeat / 4.0f));
 
     for (int beat = 0; beat < 4; ++beat) {
         // Occasional whole-beat gap for breathing room (rarer at high energy).
-        if (r.chance(0.10 * (1.2f - e))) continue;
+        if (r.chance((0.10f + gapBias) * (1.2f - e))) continue;
+        // half-gap archetype: leave beats 1 & 3 sparse for a skeletal pocket.
+        if (archetype == 3 && (beat == 0 || beat == 2) && r.chance(0.5)) continue;
         // Occasional 16th roll fill on this beat (busier as energy rises).
-        const bool roll = r.chance(0.10 + 0.18 * e);
+        const bool roll = r.chance(0.10 + rollBias + 0.18 * e);
         for (int sub = 0; sub < 4; ++sub) {
             const int slot = beat * 4 + sub;             // 0..15
-            const double t = bb + beat + 0.25 * sub;
+            const double t = mt(r, bb + beat + 0.25 * sub);
             const bool isEighth = (sub % 2) == 0;
             const bool isDown = (sub == 0);
             float p = roll ? 1.0f : (isEighth ? pbase * 1.25f : pbase * 0.75f);
@@ -337,9 +438,11 @@ void Comp::addRiddimHatBar(double bb, Rng& r, float energy) {
                 0.4f + 0.15f * float(slot & 1));
         }
     }
-    // Open-hat offbeat accent (kept from the classic riddim feel).
-    if (r.chance(0.25 + 0.25 * e))
-        add(Lane::HatOpen, bb + 2.5, 0.4, 46, hvel(r, 0.55f, 0.05f), 0.6f);
+    // Open-hat offbeat accent (richer for the offbeat-opens archetype).
+    if (r.chance(0.25 + openBias + 0.25 * e))
+        add(Lane::HatOpen, mt(r, bb + 2.5), 0.4, 46, hvel(r, 0.55f, 0.05f), 0.6f);
+    if (openBias > 0.0f && r.chance(0.35 + 0.25 * e))
+        add(Lane::HatOpen, mt(r, bb + 0.5), 0.35, 46, hvel(r, 0.5f, 0.05f), 0.55f);
 }
 
 // FILL at end of an 8-bar phrase: last 2 beats of `bar`.
@@ -348,7 +451,7 @@ void Comp::addFill(int bar, Rng& r, float nextEnergy) {
     double fillStart = bb + 2.0; // last 2 beats
     double roll = r.uniform();
 
-    if (roll < 0.25 * plan.chaos01) {
+    if (roll < 0.22 * (0.5 + plan.chaos01)) {
         // Cut fill: remove all drum notes in the LAST beat (silence gap).
         double cutFrom = bb + 3.0, cutTo = bb + 4.0;
         for (Lane l : {Lane::Kick, Lane::Snare, Lane::HatClosed, Lane::HatOpen, Lane::Perc}) {
@@ -357,7 +460,7 @@ void Comp::addFill(int bar, Rng& r, float nextEnergy) {
                 return n.startBeat >= cutFrom - 1e-6 && n.startBeat < cutTo - 1e-6;
             }), v.end());
         }
-    } else if (roll < 0.7) {
+    } else if (roll < 0.5) {
         // Snare fill: 3..5 hits densifying, velocity ramp matched to next energy.
         int hits = 3 + int(std::lround(nextEnergy * 2.0));
         hits = std::min(5, std::max(3, hits));
@@ -366,10 +469,23 @@ void Comp::addFill(int bar, Rng& r, float nextEnergy) {
             float v = 0.6f + 0.35f * (float(h) / float(hits));
             add(Lane::Snare, t, 0.2, 38, hvel(r, v, 0.05f));
         }
-    } else {
+    } else if (roll < 0.72) {
+        // Accelerating snare/tom roll over the whole last beat (1/8 -> 1/16).
+        double t = bb + 3.0;
+        int n = 6;
+        for (int h = 0; h < n; ++h) {
+            double step = (h < 2) ? 0.25 : 0.125;
+            add(Lane::Snare, t, 0.15, 38, hvel(r, 0.55f + 0.4f * float(h) / n, 0.04f));
+            t += step;
+        }
+    } else if (roll < 0.9) {
         // Extra perc flourish.
         for (int h = 0; h < 4; ++h)
             add(Lane::Perc, fillStart + h * 0.5, 0.2, 37, hvel(r, 0.55f, 0.06f), 0.5f);
+    } else {
+        // Reverse-swell / riser lift into the next section.
+        add(Lane::Riser, fillStart, 2.0, plan.rootMidi + 36, hvel(r, 0.7f, 0.04f), 0.8f);
+        add(Lane::Perc, bb + 3.5, 0.2, 37, hvel(r, 0.5f, 0.05f), 0.5f);
     }
 }
 
@@ -377,7 +493,8 @@ void Comp::addFill(int bar, Rng& r, float nextEnergy) {
 // MELODY & PAD
 void Comp::addMotif(int barStart, int bars, Rng& r, bool echo) {
     if (plan.melody01 < 0.2f) return;
-    const int reg = plan.rootMidi + 24 + (r.chance(0.5) ? 12 : 0); // rootMidi+24..+36
+    // Register varies per track (melodyReg) plus a per-call octave lift.
+    const int reg = plan.rootMidi + 24 + melodyReg + (r.chance(0.5) ? 12 : 0);
     // Build a 1-bar motif: constrained random walk, step bias, rests.
     int nNotes = 2 + r.intRange(0, 2); // 2..4
     struct MN { double beat; int deg; double len; };
@@ -414,8 +531,15 @@ void Comp::addMotif(int barStart, int bars, Rng& r, bool echo) {
 
 void Comp::addPad(const Section& s, Rng& r) {
     if (plan.melody01 < 0.5f && s.type == SectionType::Drop) return;
-    // i - VI - VII - iv progression, whole/half-note chords.
-    static const int prog[4] = {0, 8, 10, 5};
+    // One of four progressions, chosen per track (breakProg). Degrees in
+    // semitones from the minor tonic.
+    static const int progs[4][4] = {
+        {0, 8, 10, 5},   // i - VI - VII - iv
+        {0, 5, 8, 10},   // i - iv - VI - VII
+        {0, 10, 8, 3},   // i - VII - VI - III
+        {0, 3, 5, 8},    // i - III - iv - VI
+    };
+    const int* prog = progs[breakProg & 3];
     const int reg = plan.rootMidi + 12;
     for (int b = 0; b < s.bars; b += 2) {
         int chordRoot = reg + prog[(b / 2) % 4];
@@ -515,10 +639,20 @@ void Comp::composeDrop(const Section& s, int idx, Rng& r) {
     const int skip = fakeout ? 1 : 0;
 
     if (fakeout) {
-        // 1 bar of near-silence: a single vocal-ish stab / impact; drop enters bar 2.
-        add(Lane::Melody, s.startBar * BPB, 1.0, plan.rootMidi + 24,
-            0.75f, 0.6f);
-        add(Lane::Impact, s.startBar * BPB, 0.5, rootSub, 0.9f, 1.0f);
+        // 1 bar of tension before the real drop, style varied per drop:
+        // 0 = pure silence gap, 1 = vocal-ish stab, 2 = downlifter dive.
+        const double fb = s.startBar * BPB;
+        const int fakeStyle = r.pickWeighted({0.9, 1.0, 0.9}, 1.0);
+        if (fakeStyle == 1) {
+            add(Lane::Melody, fb, 1.0, plan.rootMidi + 24, 0.75f, 0.6f);
+            add(Lane::Impact, fb, 0.5, rootSub, 0.9f, 1.0f);
+        } else if (fakeStyle == 2) {
+            add(Lane::Downlifter, fb, 1.0 * BPB, plan.rootMidi + 24, 0.85f, 0.8f);
+            add(Lane::Impact, fb, 0.5, rootSub, 0.85f, 1.0f);
+        } else {
+            // silence: just a soft impact tail, then the drop hits.
+            add(Lane::Impact, fb, 0.5, rootSub, 0.7f, 0.9f);
+        }
     }
 
     // FX: impact + crash at the (real) drop entry.
@@ -636,11 +770,14 @@ void Comp::buildCurves() {
                     bs[b] = 0.7f;
                     en[b] = s.energy;
                     break;
-                case SectionType::Intro:
+                case SectionType::Intro: {
                     if (plan.params.introStyle == IntroStyle::Atmospheric)
                         bs[b] = 0.65f;
-                    en[b] = float(0.25f + 0.2f * frac); // ramp 0.25 -> 0.45
+                    // Ramp shape seeded per track: linear vs exponential swell.
+                    const double shaped = introRampExp ? (frac * frac) : frac;
+                    en[b] = float(0.25f + 0.2f * shaped); // ramp 0.25 -> 0.45
                     break;
+                }
                 case SectionType::Outro:
                     bs[b] = 0.7f;
                     en[b] = float(0.3f * (1.0 - 0.5 * frac)); // falling
