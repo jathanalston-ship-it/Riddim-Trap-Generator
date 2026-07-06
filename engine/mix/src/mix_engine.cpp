@@ -17,11 +17,13 @@ using namespace mixdsp;
 namespace {
 
 // Per-lane static gain staging table (dB), indexed by Lane.
+// Balance target (doc 07): low band (20-120 Hz) carries ~40-50% of drop
+// energy, mid-bass character audibly on top — sub supports, growls lead.
 constexpr float kLaneGainDb[kLaneCount] = {
-    /*Sub*/ -8.0f, /*BassA*/ -10.0f, /*BassB*/ -11.0f, /*BassC*/ -13.0f,
-    /*Kick*/ -7.0f, /*Snare*/ -8.5f, /*HatClosed*/ -19.0f, /*HatOpen*/ -20.0f,
-    /*Perc*/ -18.0f, /*Melody*/ -14.0f, /*Pad*/ -17.0f, /*Riser*/ -14.0f,
-    /*Downlifter*/ -14.0f, /*Impact*/ -7.0f, /*Crash*/ -13.0f,
+    /*Sub*/ -13.5f, /*BassA*/ -6.5f, /*BassB*/ -7.5f, /*BassC*/ -10.0f,
+    /*Kick*/ -9.0f, /*Snare*/ -7.0f, /*HatClosed*/ -16.0f, /*HatOpen*/ -17.0f,
+    /*Perc*/ -15.5f, /*Melody*/ -12.0f, /*Pad*/ -15.0f, /*Riser*/ -12.5f,
+    /*Downlifter*/ -12.5f, /*Impact*/ -8.0f, /*Crash*/ -12.0f,
 };
 
 // Deterministic ducking envelope from note onsets (gain multiplier, 1 = open).

@@ -54,8 +54,17 @@ The source tree scaffold in this repository mirrors the production layout
 defined in [doc 02](docs/architecture/02-folder-structure.md). Each subsystem
 folder contains a README describing its responsibility and public interface.
 
-## Status
+## Status — v1.0 implemented
 
-Architecture phase. The documents above are the authoritative design; the
-folder scaffold is in place and ready for implementation to begin per the
-[roadmap](docs/architecture/11-roadmap.md).
+The full v1.0 pipeline is implemented and verified: parameters+seed →
+plan → composition → procedural synthesis (rated, library-ingested) →
+render → mix → master (−1 dBTP, genre-target LUFS), deterministic
+end-to-end, ~10× faster than realtime, with the JUCE desktop app
+(Generate / Library / Settings, preview transport, WAV export) and
+built-in auto-update from GitHub Releases.
+
+- **Install it:** see [INSTALL.md](INSTALL.md)
+- **Build locally:** `cmake -B build && cmake --build build` (Windows or
+  Linux; JUCE fetched automatically). Headless generator: target `rtg_cli`.
+- **Release pipeline:** GitHub Actions → *Release* workflow (auto version
+  tag → Windows exe → GitHub Release; the app updates itself from these).

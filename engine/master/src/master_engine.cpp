@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 namespace rtg {
@@ -31,6 +33,12 @@ Biquad highpass(double fs, double f0, double Q) {
     Biquad bq; f0 = std::min(std::max(f0, 5.0), fs * 0.49);
     double w0 = 2 * kPi * f0 / fs, c = std::cos(w0), s = std::sin(w0), al = s / (2 * Q);
     bq.set((1 + c) / 2, -(1 + c), (1 + c) / 2, 1 + al, -2 * c, 1 - al);
+    return bq;
+}
+Biquad lowpass(double fs, double f0, double Q) {
+    Biquad bq; f0 = std::min(std::max(f0, 5.0), fs * 0.49);
+    double w0 = 2 * kPi * f0 / fs, c = std::cos(w0), s = std::sin(w0), al = s / (2 * Q);
+    bq.set((1 - c) / 2, 1 - c, (1 - c) / 2, 1 + al, -2 * c, 1 - al);
     return bq;
 }
 Biquad lowShelf(double fs, double f0, double gainDb, double S = 0.9) {
@@ -84,6 +92,25 @@ void softClipStage(StereoBuffer& buf, float thr) {
     for (auto& s : buf.r) s = softClip(s, thr);
 }
 
+// ---- low-band tamer --------------------------------------------------------
+// Sub transients otherwise consume the whole limiter ceiling and cap the
+// achievable loudness of a bass-dominant genre. Split at 150 Hz (LR4-ish),
+// soft-clip the low band hard (subs tolerate clipping famously well — this
+// is the standard riddim mastering move), leave mids/highs untouched.
+void tameLowBand(StereoBuffer& buf, double fs, float clipThr) {
+    const size_t n = buf.size();
+    if (n == 0) return;
+    Biquad lp1L = lowpass(fs, 150.0, 0.7071), lp2L = lp1L, lp1R = lp1L, lp2R = lp1L;
+    for (size_t i = 0; i < n; ++i) {
+        float lowL = lp2L.process(lp1L.process(buf.l[i]));
+        float lowR = lp2R.process(lp1R.process(buf.r[i]));
+        float highL = buf.l[i] - lowL;             // complementary split, phase-safe sum
+        float highR = buf.r[i] - lowR;
+        buf.l[i] = softClip(lowL, clipThr) + highL;
+        buf.r[i] = softClip(lowR, clipThr) + highR;
+    }
+}
+
 // ---- lookahead peak limiter (linked channels) -----------------------------
 // Backward attack-ramp builds the anticipation (no explicit signal delay);
 // exponential release. Ceiling is linear.
@@ -124,9 +151,21 @@ float measureLufs(const StereoBuffer& audio, double sampleRate) {
     const size_t n = audio.size();
     if (n == 0) return -70.0f;
 
-    // K-weight approximation: 2nd-order HP @ 60 Hz (Q 0.5) + high shelf +4 dB @ 1.5 kHz.
-    Biquad hpL = highpass(sampleRate, 60.0, 0.5), hpR = hpL;
-    Biquad shL = highShelf(sampleRate, 1500.0, 4.0), shR = shL;
+    // K-weighting. At 48 kHz use the exact BS.1770 pre-filter coefficients
+    // (published constants); the 60 Hz HP approximation under-reads 40-50 Hz
+    // sub energy by ~6 dB, which matters enormously for this genre. Other
+    // rates (not used by the engine) fall back to the approximation.
+    Biquad hpL, shL;
+    if (std::abs(sampleRate - 48000.0) < 1.0) {
+        shL.set(1.53512485958697, -2.69169618940638, 1.19839281085285,
+                1.0, -1.69065929318241, 0.73248077421585);
+        hpL.set(1.0, -2.0, 1.0,
+                1.0, -1.99004745483398, 0.99007225036621);
+    } else {
+        hpL = highpass(sampleRate, 38.0, 0.5);
+        shL = highShelf(sampleRate, 1500.0, 4.0);
+    }
+    Biquad hpR = hpL, shR = shL;
     std::vector<float> kl(n), kr(n);
     for (size_t i = 0; i < n; ++i) {
         kl[i] = shL.process(hpL.process(audio.l[i]));
@@ -261,14 +300,26 @@ StereoBuffer masterize(const StereoBuffer& premaster, const Plan& plan,
     StereoBuffer out;
     float baseLufs = measureLufs(base, sampleRate);
     float inGainDb = std::clamp(target - baseLufs, -24.0f, 24.0f);
-    for (int pass = 0; pass < 3; ++pass) {
+    const bool dbg = std::getenv("RTG_MASTER_DEBUG") != nullptr;
+    if (dbg) std::fprintf(stderr, "[master] base=%.2f LUFS target=%.2f seedGain=%.2f dB\n",
+                          baseLufs, target, inGainDb);
+    for (int pass = 0; pass < 6; ++pass) {
         out = base;
         out.applyGain(std::pow(10.0f, inGainDb / 20.0f));
+        tameLowBand(out, sampleRate, 0.35f);             // [3.5] sub clip @ ~-9 dBFS
         softClipStage(out, clipThr);                     // [4]
         limiterStage(out, sampleRate, ceiling, relSec);  // [5]
+        // True-peak conformance INSIDE the loop: clipped material overshoots
+        // the sample-peak ceiling between samples; trimming here lets the
+        // loop win the loudness back through drive/density instead of peaks.
+        float tpNow = measureTruePeakDb(out);
+        if (tpNow > -1.0f) out.applyGain(std::pow(10.0f, (-1.0f - tpNow) / 20.0f));
         float lufs = measureLufs(out, sampleRate);
+        if (dbg) std::fprintf(stderr, "[master] pass %d: gain=%.2f -> %.2f LUFS\n",
+                              pass, inGainDb, lufs);
         if (std::fabs(target - lufs) <= 0.7f) break;
-        float delta = std::clamp(target - lufs, -6.0f, 6.0f);
+        // Over-relax: in the limited regime ~2 dB of drive buys ~1 LU.
+        float delta = std::clamp((target - lufs) * 1.6f, -8.0f, 8.0f);
         inGainDb += delta;
     }
 

@@ -97,6 +97,20 @@ Plan makePlan(const Params& params) {
     for (int& b : breakBars) tryUpgrade(b, 8, 16);
     tryUpgrade(outroBars, 8, 16);
 
+    // Short targets: shrink toward the floor as well (drops stay >= 16 bars —
+    // an 8-bar drop isn't a drop). Same closer-to-target greedy rule.
+    auto tryDowngrade = [&](int& field, int delta, int floor) {
+        if (field - delta < floor) return;
+        int before = std::abs(targetBars - totalBars());
+        field -= delta;
+        int after = std::abs(targetBars - totalBars());
+        if (after >= before) field += delta;
+    };
+    tryDowngrade(introBars, 8, 8);    // 16-bar intros halve first
+    tryDowngrade(outroBars, 4, 4);
+    tryDowngrade(buildBars, 4, 4);
+    tryDowngrade(introBars, 4, 4);
+
     // ---- Palettes: one per drop --------------------------------------------
     plan.palettes.clear();
     for (int d = 0; d < dropCount; ++d) {
