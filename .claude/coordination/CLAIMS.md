@@ -12,3 +12,4 @@ Status: ACTIVE → DONE (or STALE if >12h without commits; may be taken over).
 | session | claimed (UTC) | status | paths | goal |
 |---|---|---|---|---|
 | fable-main-1 | 2026-07-06 04:20 | DONE | engine/decision/{include/rtg/decision/calibration.h,src/calibration.cpp}, tools/rtg_cli/main.cpp, app/src/GenerationController.{h,cpp}, ui/src/pages/SettingsPage.{h,cpp}, docs/CALIBRATION.md, VERSION | In-app calibration flow (Settings panel), shipped as v1.2.0 |
+| fable-main-1 | 2026-07-06 06:05 | ACTIVE | engine/drum_generator/** (drum_synth.cpp + new drum_profile module), tools/drum_profiler/ (new), CMakeLists.txt (add rtg_drumprof target only) | Drum reference-matching: analyze user reference track's drums, DrumProfile targets steer kick/snare/hat synthesis. NOT touching calibration.*, bass_designer, analysis.cpp, rtg_cli, VERSION (growl-fingerprint session owns those + this round's release) |
