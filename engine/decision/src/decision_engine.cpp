@@ -82,8 +82,16 @@ Plan makePlan(const Params& params) {
     // then fit toward the target length by a randomized hill-climb so different
     // seeds distribute the "filler" bars across different sections — genuinely
     // different structures per seed rather than one canonical layout.
-    const int dropCount = std::clamp(params.dropCount, 1, 4);
+    int dropCount = std::clamp(params.dropCount, 1, 4);
     const int targetBars = barsForSeconds(params.lengthSec, bpm);
+    // Reconcile drop count with the requested length: each dropset needs at
+    // least build(4) + drop(16) (+break(8) between), plus intro/outro(4+4).
+    // A 45 s request with 4 drops would otherwise silently render ~3 minutes.
+    while (dropCount > 1) {
+        const int floorBars = 8 + dropCount * 20 + (dropCount - 1) * 8;
+        if (targetBars >= int(floorBars * 0.85f)) break;
+        --dropCount;
+    }
 
     auto pickMenu = [&](std::initializer_list<int> opts,
                         std::initializer_list<double> w) -> int {
