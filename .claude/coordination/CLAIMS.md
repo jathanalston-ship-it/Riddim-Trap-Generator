@@ -11,4 +11,4 @@ Status: ACTIVE → DONE (or STALE if >12h without commits; may be taken over).
 
 | session | claimed (UTC) | status | paths | goal |
 |---|---|---|---|---|
-| fable-main-1 | 2026-07-06 04:20 | ACTIVE | engine/decision/{include/rtg/decision/calibration.h,src/calibration.cpp}, tools/rtg_cli/main.cpp, app/src/GenerationController.{h,cpp}, ui/src/pages/SettingsPage.{h,cpp}, docs/CALIBRATION.md | In-app calibration flow (Settings panel), then VERSION → 1.2.0 release |
+| fable-main-1 | 2026-07-06 04:20 | DONE | engine/decision/{include/rtg/decision/calibration.h,src/calibration.cpp}, tools/rtg_cli/main.cpp, app/src/GenerationController.{h,cpp}, ui/src/pages/SettingsPage.{h,cpp}, docs/CALIBRATION.md, VERSION | In-app calibration flow (Settings panel), shipped as v1.2.0 |

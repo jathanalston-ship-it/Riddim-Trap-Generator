@@ -2,32 +2,53 @@
 
 Riddim Trap Generator ships with hand-tuned targets for loudness and tonal
 balance. **Reference calibration** lets you replace those defaults with the
-*measured* characteristics of commercial tracks you like: drop a few reference
-WAVs in a folder, run one command, and the mix/master engines will target the
-loudness, tonal balance and spectral tilt of your references instead of the
-built-in numbers.
+*measured* characteristics of commercial tracks you like: point the app at a few
+reference songs and the mix/master engines will target the loudness, tonal
+balance and spectral tilt of your references instead of the built-in numbers.
 
 It is **fully local and analysis-only** — no audio from your references is ever
 copied, embedded, or uploaded. Only a handful of aggregate numbers are written
 to a small `calibration.json` file.
 
-## 1. Rip your references to WAV
+## 1. Calibrate in the app (recommended)
 
-Collect 3–10 commercial riddim (or trap) tracks whose sound you want to match
-and export/convert each to a **WAV** file into a single folder, e.g.
-`C:\refs`. Supported formats:
+Everything happens on the **Settings** page under **Reference Calibration** — no
+terminal, no file conversion.
 
-- 16-bit, 24-bit or 32-bit PCM, or 32-bit float
-- Mono or stereo
-- 44.1 kHz or 48 kHz (44.1 kHz is resampled automatically)
+1. Pick the profile the analysis should update: **Riddim**, **Trap**, or
+   **Both** (a single combined profile used for all genres).
+2. Click **Add reference tracks…** and multi-select 3–5 commercial songs you
+   love. Supported formats: **MP3, WAV, FLAC, AIFF, Ogg** (MP3/AAC decoding is
+   available on Windows via Media Foundation).
+3. The app analyzes each file on a background thread — you'll see a progress bar
+   and the current filename. When it finishes, calibration is **active
+   immediately**: the very next generation targets your references.
 
-More references give a more robust median. Use full tracks (with drops and
-breaks) — the analyzer measures the loudest sections, so intros/outros don't
-skew the result.
+The status line shows what's active, e.g.
+`Active: riddim 4 refs · trap 3 refs · target -8.9 LUFS`, and the result line
+reports any files that could not be decoded (e.g. `2 files could not be
+decoded.`). Use **Clear calibration** to return to the built-in defaults.
 
-## 2. Run the analyzer
+Tips:
 
-From a command prompt (Windows paths shown):
+- More references give a more robust median. Use full tracks (with drops and
+  breaks) — the analyzer measures the loudest sections, so intros/outros don't
+  skew the result.
+- Any sample rate is fine; files are resampled to 48 kHz internally. Very long
+  files are analyzed over their middle 4 minutes to bound memory.
+- Re-running for a genre **replaces** that genre's profile and preserves the
+  other genre already stored.
+
+The app writes `calibration.json` into its library directory
+(`%APPDATA%\RiddimTrapGenerator\library` on Windows) and auto-loads it on every
+launch, so the calibration persists across restarts.
+
+## 2. Headless / batch alternative (CLI)
+
+For scripting, CI, or headless machines you can still run the analyzer from the
+command line. It shares the exact same measurement and aggregation code as the
+in-app panel, so results are identical. References must be **WAV** files in a
+folder (16/24/32-bit PCM or float, mono or stereo, 44.1 or 48 kHz):
 
 ```
 rtg_cli --analyze-refs C:\refs --genre riddim --calib-out "%APPDATA%\RiddimTrapGenerator\library\calibration.json"
@@ -41,11 +62,9 @@ rtg_cli --analyze-refs C:\refs --genre riddim --calib-out "%APPDATA%\RiddimTrapG
 - `--calib-out <path>` — where to write `calibration.json`. If omitted, it is
   written next to `--library` (if given), otherwise to `./calibration.json`.
 
-The engines auto-load `calibration.json` from the **library directory** at
-startup, so writing it there (as above) is all you need. The GUI's library
-directory is `%APPDATA%\RiddimTrapGenerator\library` on Windows.
-
-The analyzer prints a per-file table and the aggregate (median) it stored:
+Writing to the library directory (as above) is all you need — the engines
+auto-load `calibration.json` from there at startup. The analyzer prints a
+per-file table and the aggregate (median) it stored:
 
 ```
 file                            LUFS  crest    sub   loM   mid   hiM    hi   contr   tilt  width
@@ -76,7 +95,8 @@ identical file.
 
 ## 4. Reset
 
-To go back to the built-in defaults, **delete `calibration.json`** from the
-library directory. With no file present the engines use their hand-tuned
-targets again. Re-running `--analyze-refs` overwrites the file (updating just
-the analyzed genre and the combined fallback).
+To go back to the built-in defaults, click **Clear calibration** on the Settings
+page (or **delete `calibration.json`** from the library directory manually).
+With no file present the engines use their hand-tuned targets again. Re-running
+the analyzer — in the app or via `--analyze-refs` — overwrites the file
+(updating just the analyzed genre and the combined fallback).

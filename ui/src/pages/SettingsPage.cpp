@@ -9,6 +9,7 @@ SettingsPage::SettingsPage(rtg::app::GenerationController& controller,
                            rtg::app::UpdateChecker& updater)
     : controller_(controller), updater_(updater) {
     updater_.addChangeListener(this);
+    controller_.addChangeListener(this);
 
     deviceSelector_ = std::make_unique<juce::AudioDeviceSelectorComponent>(
         controller_.deviceManager(),
@@ -48,15 +49,53 @@ SettingsPage::SettingsPage(rtg::app::GenerationController& controller,
     };
     addAndMakeVisible(openDataButton_);
 
+    // ---- Reference Calibration panel ----
+    calStatusLabel_.setFont(rtgSansFont(14.0f, true));
+    calStatusLabel_.setColour(juce::Label::textColourId, Colors::text);
+    addAndMakeVisible(calStatusLabel_);
+
+    calGenreBox_.addItem("Riddim", 1);
+    calGenreBox_.addItem("Trap", 2);
+    calGenreBox_.addItem("Both", 3);
+    calGenreBox_.setSelectedId(1, juce::dontSendNotification);
+    addAndMakeVisible(calGenreBox_);
+
+    calAddButton_.getProperties().set("primary", true);
+    calAddButton_.onClick = [this] { chooseReferenceFiles(); };
+    addAndMakeVisible(calAddButton_);
+
+    calClearButton_.onClick = [this] {
+        juce::AlertWindow::showOkCancelBox(
+            juce::MessageBoxIconType::WarningIcon,
+            "Clear calibration",
+            "Remove the active reference calibration and return to built-in defaults?",
+            "Clear", "Cancel", this,
+            juce::ModalCallbackFunction::create([this](int result) {
+                if (result == 1) { controller_.clearCalibration(); refreshCalibrationUI(); }
+            }));
+    };
+    addAndMakeVisible(calClearButton_);
+
+    calResultLabel_.setFont(rtgSansFont(12.0f));
+    calResultLabel_.setColour(juce::Label::textColourId, Colors::dim);
+    addAndMakeVisible(calResultLabel_);
+
+    calProgressBar_.setColour(juce::ProgressBar::backgroundColourId, Colors::panelBg2);
+    addChildComponent(calProgressBar_);
+
     refreshUpdateUI();
+    refreshCalibrationUI();
 }
 
 SettingsPage::~SettingsPage() {
+    stopTimer();
     updater_.removeChangeListener(this);
+    controller_.removeChangeListener(this);
 }
 
-void SettingsPage::changeListenerCallback(juce::ChangeBroadcaster*) {
-    refreshUpdateUI();
+void SettingsPage::changeListenerCallback(juce::ChangeBroadcaster* source) {
+    if (source == &updater_) refreshUpdateUI();
+    else                     refreshCalibrationUI();
 }
 
 void SettingsPage::refreshUpdateUI() {
@@ -91,8 +130,69 @@ void SettingsPage::refreshUpdateUI() {
     repaint();
 }
 
+void SettingsPage::refreshCalibrationUI() {
+    const auto sum = controller_.calibrationSummary();
+    const bool analyzing = controller_.isAnalyzingReferences();
+
+    juce::String status;
+    if (!sum.active) {
+        status = juce::String::fromUTF8("No calibration — generations use built-in defaults");
+    } else if (sum.perGenre) {
+        status = juce::String::fromUTF8("Active: riddim ") + juce::String(sum.riddimRefs)
+               + juce::String::fromUTF8(" refs · trap ") + juce::String(sum.trapRefs)
+               + juce::String::fromUTF8(" refs · target ") + juce::String(sum.targetLufs, 1) + " LUFS";
+    } else {
+        status = juce::String::fromUTF8("Active: combined ") + juce::String(sum.combinedRefs)
+               + juce::String::fromUTF8(" refs · target ") + juce::String(sum.targetLufs, 1) + " LUFS";
+    }
+    calStatusLabel_.setText(status, juce::dontSendNotification);
+
+    calProgressValue_ = controller_.referenceProgress();
+    calProgressBar_.setVisible(analyzing);
+    calResultLabel_.setText(controller_.referenceStatusText(), juce::dontSendNotification);
+
+    calAddButton_.setEnabled(!analyzing);
+    calGenreBox_.setEnabled(!analyzing);
+    calClearButton_.setEnabled(!analyzing && sum.active);
+
+    if (analyzing && !isTimerRunning()) startTimerHz(15);
+    if (!analyzing && isTimerRunning()) stopTimer();
+    repaint();
+}
+
+void SettingsPage::chooseReferenceFiles() {
+    fileChooser_ = std::make_unique<juce::FileChooser>(
+        "Select reference tracks",
+        juce::File::getSpecialLocation(juce::File::userMusicDirectory),
+        "*.wav;*.mp3;*.flac;*.aiff;*.aif;*.ogg");
+    const int chooserFlags = juce::FileBrowserComponent::openMode
+                           | juce::FileBrowserComponent::canSelectFiles
+                           | juce::FileBrowserComponent::canSelectMultipleItems;
+    fileChooser_->launchAsync(chooserFlags, [this](const juce::FileChooser& fc) {
+        const juce::Array<juce::File> results = fc.getResults();
+        if (results.isEmpty()) return;
+        const int genreSel = calGenreBox_.getSelectedId() - 1;   // 0 riddim, 1 trap, 2 both
+        controller_.analyzeReferencesAsync(results, genreSel);
+        refreshCalibrationUI();
+    });
+}
+
+void SettingsPage::timerCallback() {
+    calProgressValue_ = controller_.referenceProgress();
+    calProgressBar_.repaint();
+    calResultLabel_.setText(controller_.referenceStatusText(), juce::dontSendNotification);
+    if (!controller_.isAnalyzingReferences()) refreshCalibrationUI();
+}
+
+// Lays out the bottom Reference-Calibration band. Mirrors the row sequence used
+// by paint() so headers/copy and controls line up. Returns nothing; positions
+// child components. `cal` is consumed.
 void SettingsPage::resized() {
     auto area = getLocalBounds().reduced(16);
+
+    // Reserve the bottom band for the reference-calibration panel.
+    auto cal = area.removeFromBottom(185);
+    area.removeFromBottom(12);
 
     // Audio panel (left half).
     auto audio = area.removeFromLeft(area.getWidth() / 2 - 8);
@@ -118,22 +218,61 @@ void SettingsPage::resized() {
         releaseNotes_.setBounds(up.removeFromTop(juce::jmax(0, up.getHeight() - 70)));
     up.removeFromBottom(4);
 
-    // Data row at bottom.
+    // Data row at bottom of the updates column.
     auto dataRow = up.removeFromBottom(30);
     openDataButton_.setBounds(dataRow.removeFromRight(80));
     dataRow.removeFromRight(8);
     dataPathLabel_.setBounds(dataRow);
+
+    // ---- Reference calibration band (row sequence shared with paint()) ----
+    cal.removeFromTop(24);                       // header  (paint)
+    cal.removeFromTop(4);
+    calStatusLabel_.setBounds(cal.removeFromTop(22));
+    cal.removeFromTop(6);
+    cal.removeFromTop(32);                        // explanatory copy (paint)
+    cal.removeFromTop(8);
+    auto row = cal.removeFromTop(32);
+    calGenreBox_.setBounds(row.removeFromLeft(150));
+    row.removeFromLeft(10);
+    calAddButton_.setBounds(row.removeFromLeft(210));
+    row.removeFromLeft(10);
+    calClearButton_.setBounds(row.removeFromLeft(150));
+    cal.removeFromTop(10);
+    calProgressBar_.setBounds(cal.removeFromTop(18));
+    cal.removeFromTop(4);
+    calResultLabel_.setBounds(cal.removeFromTop(20));
 }
 
 void SettingsPage::paint(juce::Graphics& g) {
     auto area = getLocalBounds().reduced(16);
+
+    auto cal = area.removeFromBottom(185);
+    area.removeFromBottom(12);
+
     g.setColour(Colors::text);
     g.setFont(rtgSansFont(16.0f, true));
-
     auto audio = area.removeFromLeft(area.getWidth() / 2 - 8);
     g.drawText("Audio device", audio.removeFromTop(24), juce::Justification::topLeft, false);
     area.removeFromLeft(16);
     g.drawText("Updates", area.removeFromTop(24), juce::Justification::topLeft, false);
+
+    // Reference calibration band.
+    g.setColour(Colors::panelStroke);
+    g.drawLine((float) cal.getX(), (float) cal.getY() - 6.0f,
+               (float) cal.getRight(), (float) cal.getY() - 6.0f, 1.0f);
+
+    g.setColour(Colors::text);
+    g.setFont(rtgSansFont(16.0f, true));
+    g.drawText("Reference Calibration", cal.removeFromTop(24), juce::Justification::topLeft, false);
+    cal.removeFromTop(4);
+    cal.removeFromTop(22);   // status label (component)
+    cal.removeFromTop(6);
+    g.setColour(Colors::dim);
+    g.setFont(rtgSansFont(12.0f));
+    g.drawFittedText(juce::String::fromUTF8(
+        "Drop in 3–5 commercial tracks you love. The engine measures their loudness and tonal "
+        "balance and targets that character. Analysis only — audio never leaves your computer."),
+        cal.removeFromTop(32), juce::Justification::topLeft, 2);
 }
 
 } // namespace rtg::ui

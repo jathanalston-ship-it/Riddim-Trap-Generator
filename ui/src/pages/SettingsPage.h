@@ -8,7 +8,8 @@
 namespace rtg::ui {
 
 class SettingsPage : public juce::Component,
-                     public juce::ChangeListener {
+                     public juce::ChangeListener,
+                     private juce::Timer {
 public:
     SettingsPage(rtg::app::GenerationController& controller,
                  rtg::app::UpdateChecker& updater);
@@ -20,6 +21,9 @@ public:
 
 private:
     void refreshUpdateUI();
+    void refreshCalibrationUI();
+    void chooseReferenceFiles();
+    void timerCallback() override;
 
     rtg::app::GenerationController& controller_;
     rtg::app::UpdateChecker& updater_;
@@ -35,6 +39,16 @@ private:
 
     juce::Label dataPathLabel_;
     juce::TextButton openDataButton_ { "Open" };
+
+    // ---- Reference Calibration panel ----
+    juce::Label calStatusLabel_;
+    juce::ComboBox calGenreBox_;
+    juce::TextButton calAddButton_ { "Add reference tracks\xE2\x80\xA6" };
+    juce::TextButton calClearButton_ { "Clear calibration" };
+    juce::Label calResultLabel_;
+    double calProgressValue_ = 0.0;
+    juce::ProgressBar calProgressBar_ { calProgressValue_ };
+    std::unique_ptr<juce::FileChooser> fileChooser_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SettingsPage)
 };

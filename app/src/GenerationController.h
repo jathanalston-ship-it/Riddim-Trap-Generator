@@ -62,6 +62,29 @@ public:
     int voteCount() const;             // total anonymous votes recorded locally
     int modelTrainedOn() const;        // trainedOn from saved weights (0 if none)
 
+    // --- Reference Calibration --------------------------------------------
+    // In-app equivalent of `rtg_cli --analyze-refs`. Decodes the chosen audio
+    // files (MP3/WAV/FLAC/AIFF/Ogg) on a background thread, resamples each to
+    // 48 kHz, measures loudness + tonal balance, aggregates the medians, stores
+    // the result as a genre profile in <library>/calibration.json and activates
+    // it immediately. Analysis-only — no audio is copied or uploaded.
+    // genreSel: 0 = riddim, 1 = trap, 2 = both/combined.
+    void analyzeReferencesAsync(const juce::Array<juce::File>& files, int genreSel);
+    bool isAnalyzingReferences() const;
+    float referenceProgress() const;          // 0..1 across the file set
+    juce::String referenceStatusText() const; // current file / last result / error
+
+    struct CalibrationSummary {
+        bool  active = false;      // a calibration.json is loaded
+        bool  perGenre = false;    // riddim/trap were split out
+        int   riddimRefs = 0;
+        int   trapRefs = 0;
+        int   combinedRefs = 0;
+        float targetLufs = 0.0f;   // combined target loudness
+    };
+    CalibrationSummary calibrationSummary() const;
+    void clearCalibration();       // delete calibration.json + setActive(nullopt)
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
