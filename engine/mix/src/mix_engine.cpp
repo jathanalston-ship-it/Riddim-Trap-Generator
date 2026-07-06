@@ -90,20 +90,28 @@ void applyCalibrationBandCorrection(StereoBuffer& mix, double sr, Genre genre) {
     const CalibrationProfile& prof = cal->forGenre(genre);
     if (!prof.present) return;
 
-    std::array<float, kCalBands> mine = measureBandShares(mix, sr);
-    // Center frequencies for the 5 correction filters (Hz).
+    // Two passes with re-measurement: reference comparison showed one gentle
+    // pass leaves large spectral gaps (gen mid-band 2.8% vs ref 15.4%) —
+    // self-limiting because each pass corrects toward the measured target,
+    // so source-side improvements automatically shrink the applied EQ.
     const double fc[kCalBands] = { 120.0, 250.0, 1000.0, 3500.0, 6000.0 };
-    for (int b = 0; b < kCalBands; ++b) {
-        float target = prof.bands[b];
-        float have = std::max(mine[b], 1e-6f);
-        // Energy ratio in dB, applied at half strength, clamped to +/-2.5 dB.
-        float trimDb = std::clamp(5.0f * std::log10(std::max(target, 1e-6f) / have),
-                                  -2.5f, 2.5f);
-        if (std::fabs(trimDb) < 0.05f) continue;
-        Biquad bq = (b == 0)               ? makeLowShelf(sr, fc[0], trimDb)
-                  : (b == kCalBands - 1)   ? makeHighShelf(sr, fc[kCalBands - 1], trimDb)
-                                           : makePeaking(sr, fc[b], trimDb, 1.0);
-        applyStereo(bq, mix);
+    for (int pass = 0; pass < 2; ++pass) {
+        std::array<float, kCalBands> mine = measureBandShares(mix, sr);
+        bool touched = false;
+        for (int b = 0; b < kCalBands; ++b) {
+            float target = prof.bands[b];
+            float have = std::max(mine[b], 1e-6f);
+            // Energy ratio in dB at half strength, clamped to +/-4.5 dB/pass.
+            float trimDb = std::clamp(5.0f * std::log10(std::max(target, 1e-6f) / have),
+                                      -4.5f, 4.5f);
+            if (std::fabs(trimDb) < 0.25f) continue;
+            touched = true;
+            Biquad bq = (b == 0)               ? makeLowShelf(sr, fc[0], trimDb)
+                      : (b == kCalBands - 1)   ? makeHighShelf(sr, fc[kCalBands - 1], trimDb)
+                                               : makePeaking(sr, fc[b], trimDb, 1.0);
+            applyStereo(bq, mix);
+        }
+        if (!touched) break;
     }
 }
 

@@ -176,6 +176,10 @@ Plan makePlan(const Params& params) {
     if (const auto& cal = Calibration::active()) {
         const CalibrationProfile& prof = cal->forGenre(params.genre);
         if (prof.present)
+            // Refs measure ~-5.8 but pushing past -6.5 through the sub clipper
+            // manufactures low-mid intermod mud (verified: loM 18.6%→29.7% and
+            // crest 2.4→1.8 dB at -6.0). Revisit once growls carry real mid
+            // energy at the source.
             plan.masterTargetLufs = std::clamp(prof.targetLufs, -14.0f, -6.5f);
     }
 
