@@ -313,6 +313,17 @@ StereoBuffer masterize(const StereoBuffer& premaster, const Plan& plan,
     const bool dbg = std::getenv("RTG_MASTER_DEBUG") != nullptr;
     if (dbg) std::fprintf(stderr, "[master] base=%.2f LUFS target=%.2f seedGain=%.2f dB\n",
                           baseLufs, target, inGainDb);
+
+    // Crest guard: references keep 4-6 dB of crest even at commercial
+    // loudness; grinding past that floor buys loudness by destroying punch
+    // (and the sub clipper's intermod repaints low-mids). Floor comes from
+    // the active calibration's measured crest when present.
+    float crestFloor = 3.6f;
+    if (const auto& cal = Calibration::active()) {
+        const auto& prof = cal->forGenre(plan.params.genre);
+        if (prof.present) crestFloor = std::clamp(prof.crestDb - 0.5f, 3.0f, 8.0f);
+    }
+
     for (int pass = 0; pass < 6; ++pass) {
         out = base;
         out.applyGain(std::pow(10.0f, inGainDb / 20.0f));
@@ -325,11 +336,47 @@ StereoBuffer masterize(const StereoBuffer& premaster, const Plan& plan,
         float tpNow = measureTruePeakDb(out);
         if (tpNow > -1.0f) out.applyGain(std::pow(10.0f, (-1.0f - tpNow) / 20.0f));
         float lufs = measureLufs(out, sampleRate);
-        if (dbg) std::fprintf(stderr, "[master] pass %d: gain=%.2f -> %.2f LUFS\n",
-                              pass, inGainDb, lufs);
+        // Crest against the loudest-quartile 400 ms block RMS (drop sections),
+        // not whole-track RMS — quiet intros/breaks would inflate the reading
+        // and the guard would never fire.
+        float crestNow;
+        {
+            const size_t blk = std::max<size_t>(1, size_t(0.4 * sampleRate));
+            std::vector<double> brms;
+            for (size_t s = 0; s + blk <= out.size(); s += blk) {
+                double acc = 0.0;
+                for (size_t i = s; i < s + blk; ++i)
+                    acc += 0.5 * (double(out.l[i]) * out.l[i] + double(out.r[i]) * out.r[i]);
+                brms.push_back(std::sqrt(acc / double(blk)));
+            }
+            double loud = rmsOf(out);
+            if (!brms.empty()) {
+                std::sort(brms.begin(), brms.end());
+                loud = brms[size_t(double(brms.size() - 1) * 0.75)];
+            }
+            crestNow = float(20.0 * std::log10(std::max(double(out.peak()), 1e-9) /
+                                               std::max(loud, 1e-9)));
+        }
+        if (dbg) std::fprintf(stderr, "[master] pass %d: gain=%.2f -> %.2f LUFS, crest %.1f dB\n",
+                              pass, inGainDb, lufs, crestNow);
         if (std::fabs(target - lufs) <= 0.7f) break;
+        const float wanted = target - lufs;
+        if (wanted > 0.0f && crestNow < crestFloor) {
+            // Dynamics floor reached: back off slightly and settle there —
+            // punch beats the last LU of loudness.
+            inGainDb -= 1.0f;
+            out = base;
+            out.applyGain(std::pow(10.0f, inGainDb / 20.0f));
+            tameLowBand(out, sampleRate, 0.35f);
+            softClipStage(out, clipThr);
+            limiterStage(out, sampleRate, ceiling, relSec);
+            float tp2 = measureTruePeakDb(out);
+            if (tp2 > -1.0f) out.applyGain(std::pow(10.0f, (-1.0f - tp2) / 20.0f));
+            if (dbg) std::fprintf(stderr, "[master] crest floor %.1f hit — settling\n", crestFloor);
+            break;
+        }
         // Over-relax: in the limited regime ~2 dB of drive buys ~1 LU.
-        float delta = std::clamp((target - lufs) * 1.6f, -8.0f, 8.0f);
+        float delta = std::clamp(wanted * 1.6f, -8.0f, 8.0f);
         inGainDb += delta;
     }
 
