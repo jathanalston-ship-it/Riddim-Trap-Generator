@@ -11,6 +11,7 @@
 #include <cstdio>
 #include "../../sound_design/src/dsp.h"
 #include "../../sound_design/src/voices.h"
+#include "rtg/drums/drum_profile.h"   // DrumProfile::active() — reference targets
 
 namespace rtg::synth {
 using namespace dsp;
@@ -37,10 +38,16 @@ Recipe makeKickRecipe(float aggr, float dark, float nov, Rng& rng) {
     Recipe r; r.role = Role::Kick; r.seed = rng.next();
     r.name = dName("kick", rng);
     auto& p = r.p;
-    p["startHz"]   = rng.rangef(120.0f, 160.0f);
-    p["endHz"]     = rng.rangef(44.0f, 54.0f);
+    // Ranges centered on the active drum reference profile (±20-30% seeded
+    // variety); aggression still modulates within the band.
+    const auto& dp = rtg::DrumProfile::active();
+    const float body = dp.kickBodyHz;                 // ~55 Hz (refs 47-63)
+    const float decay = dp.kickDecayMs * 0.001f;      // ~0.09 s, biased short
+    p["startHz"]   = rng.rangef(body * 2.1f, body * 2.9f);          // glide start
+    p["endHz"]     = rng.rangef(body * 0.86f, body * 1.14f);        // settles ~body
     p["pitchMs"]   = rng.rangef(0.020f, 0.045f);
-    p["bodyDecay"] = rng.rangef(0.13f, 0.24f) + (1.0f - aggr) * 0.10f; // trap boomier
+    // Decay from the profile, biased short; trap a touch boomier.
+    p["bodyDecay"] = rng.rangef(decay * 0.78f, decay * 1.22f) + (1.0f - aggr) * 0.035f;
     // "Punch": low harmonics (3f-5f, ~140-260 Hz) on a medium env give clean
     // low-mid body that pulls the sound out of pure-sub territory (no fizz).
     p["punchAmt"]  = rng.rangef(0.85f, 1.2f) + aggr * 0.2f;
@@ -49,9 +56,14 @@ Recipe makeKickRecipe(float aggr, float dark, float nov, Rng& rng) {
     p["knockHz"]   = rng.rangef(155.0f, 235.0f);
     p["knockAmt"]  = rng.rangef(0.85f, 1.2f);
     p["knockMs"]   = rng.rangef(0.08f, 0.14f);
-    // Beater click: band-limited noise burst, sharpens the onset only.
-    p["clickAmt"]  = 0.4f + aggr * 0.35f;
-    p["clickHz"]   = rng.rangef(2000.0f, 3600.0f);
+    // Beater click/knock: band-limited 2-6 kHz noise burst. The references have
+    // an audible click (2-8 kHz share ~4-7%); this restores it. Level is
+    // calibrated (kClickCal) so the rendered kick's 2-8 kHz energy share lands
+    // near the profile's kickClickShare. Band-limited to <=6 kHz — no >8k fizz.
+    const float kClickCal = 5.0f;   // maps clickShare target -> layer amplitude
+    p["clickAmt"]  = kClickCal * dp.kickClickShare * (0.85f + 0.45f * aggr);
+    p["clickHz"]   = rng.rangef(3000.0f, 4200.0f);
+    p["clickMs"]   = rng.rangef(0.004f, 0.008f);    // longer than a tick -> real 2-6k energy
     p["bodyLP"]    = rng.rangef(2800.0f, 3800.0f);  // guarantees no top-end fizz
     p["drive"]     = 1.0f + aggr * 0.6f;            // <=1.3 @0.5, <=1.6 @1.0
     p["gain"]      = 0.85f;

@@ -43,6 +43,7 @@ target_include_directories(rtg_core PUBLIC
     utils/include
     engine/decision/include
     engine/composition/include
+    engine/drum_generator/include
     engine/sound_design/include
     engine/mix/include
     engine/master/include
@@ -57,6 +58,10 @@ endif()
 # ---- rtg_cli: headless generator (CI smoke tests, local verification) -------
 add_executable(rtg_cli tools/rtg_cli/main.cpp)
 target_link_libraries(rtg_cli PRIVATE rtg_core)
+
+# ---- rtg_drumprof: drum reference-profile extractor -------------------------
+add_executable(rtg_drumprof tools/drum_profiler/main.cpp)
+target_link_libraries(rtg_drumprof PRIVATE rtg_core)
 
 # ---- GUI application ---------------------------------------------------------
 if(RTG_BUILD_APP)
