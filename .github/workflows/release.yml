@@ -18,6 +18,8 @@ on:
         options: [patch, minor, major]
   push:
     tags: ["v*"]
+    branches: ["main", "claude/**"]
+    paths: ["VERSION"]
 
 permissions:
   contents: write
@@ -35,7 +37,9 @@ jobs:
         id: version
         shell: bash
         run: |
-          # Tag push: release exactly that version. Manual dispatch: bump.
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          git fetch --tags --quiet
+          # 1) Tag push: release exactly that version.
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             next="${GITHUB_REF#refs/tags/v}"
             echo "version=$next" >> "$GITHUB_OUTPUT"
@@ -43,7 +47,20 @@ jobs:
             echo "Releasing pushed tag v$next"
             exit 0
           fi
-          git fetch --tags --quiet
+          # 2) Branch push touching VERSION: release the file's version
+          #    (skip if that tag already exists).
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            next=$(tr -d ' \n\r' < VERSION); next="${next#v}"
+            if git rev-parse -q --verify "refs/tags/v$next" >/dev/null; then
+              echo "Tag v$next already exists — nothing to release."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+            fi
+            echo "version=$next" >> "$GITHUB_OUTPUT"
+            echo "tag=v$next"    >> "$GITHUB_OUTPUT"
+            echo "Releasing VERSION file v$next"
+            exit 0
+          fi
+          # 3) Manual dispatch: bump from the latest existing tag.
           latest=$(git tag -l 'v*' --sort=-v:refname | head -1)
           if [ -z "$latest" ]; then
             next="1.0.0"
@@ -61,30 +78,35 @@ jobs:
           echo "Releasing v$next (previous: ${latest:-none})"
 
       - name: Cache JUCE
+        if: steps.version.outputs.skip != 'true'
         uses: actions/cache@v4
         with:
           path: build/_deps
           key: juce-8.0.4-windows-${{ runner.os }}
 
       - name: Configure
+        if: steps.version.outputs.skip != 'true'
         shell: bash
         run: |
           cmake -B build -DRTG_VERSION="${{ steps.version.outputs.version }}" \
                 -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
+        if: steps.version.outputs.skip != 'true'
         shell: bash
         run: |
           cmake --build build --config Release --target rtg_cli -j 4
           cmake --build build --config Release --target RiddimTrapGenerator -j 4
 
       - name: Smoke test (headless render)
+        if: steps.version.outputs.skip != 'true'
         shell: bash
         run: |
           ./build/Release/rtg_cli.exe --out smoke.wav --seconds 45 --seed 42
           ./build/Release/rtg_cli.exe --out smoke_trap.wav --genre trap --seconds 45 --seed 7
 
       - name: Package
+        if: steps.version.outputs.skip != 'true'
         id: package
         shell: bash
         run: |
@@ -98,6 +120,7 @@ jobs:
           ls -la
 
       - name: Create release
+        if: steps.version.outputs.skip != 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
