@@ -55,6 +55,16 @@ struct PhaseOsc {
         advance();
         return v;
     }
+    // variable-width pulse (band-limited via polyBLEP). width in (0,1).
+    double pulse(double width) {
+        width = clampd(width, 0.05, 0.95);
+        double v = phase < width ? 1.0 : -1.0;
+        v += polyBlep(phase, inc);
+        double t2 = phase + (1.0 - width); if (t2 >= 1.0) t2 -= 1.0;
+        v -= polyBlep(t2, inc);
+        advance();
+        return v;
+    }
     // sample sine at an arbitrary phase offset (for FM) without advancing.
     double sineAt(double extraPhase) const { return std::sin(kTwoPi * phase + extraPhase); }
 };
@@ -371,6 +381,128 @@ struct Split3 {
         float m, h;
         high.split(rest, m, h);
         lo = l; mid = m; hi = h;
+    }
+};
+
+// ------------------------------------------------------------------ vowel formants
+// Sung-vowel formant centres F1/F2/F3 (Hz). The "talking" growl morphs between
+// these; a small parallel band-pass bank realises each vowel (see FormantBank).
+struct Vowel { float f1, f2, f3; };
+constexpr int kVowelCount = 5;
+inline const Vowel& vowelTable(int i) {
+    static const Vowel V[kVowelCount] = {
+        {730.0f, 1090.0f, 2440.0f}, // A  (ah)
+        {530.0f, 1840.0f, 2480.0f}, // E  (eh)
+        {390.0f, 1990.0f, 2550.0f}, // I  (ee)
+        {570.0f,  840.0f, 2410.0f}, // O  (oh)
+        {440.0f, 1020.0f, 2240.0f}, // U  (oo)
+    };
+    return V[((i % kVowelCount) + kVowelCount) % kVowelCount];
+}
+// Interpolate a vowel along a path of `count` vowel indices at pos in [0,1].
+inline Vowel vowelMorph(const int* path, int count, float pos, float octave = 1.0f) {
+    count = std::max(1, count);
+    pos = clampf(pos, 0.0f, 1.0f);
+    float x = pos * float(count - 1);
+    int i0 = std::min(int(x), count - 1);
+    int i1 = std::min(i0 + 1, count - 1);
+    float t = x - float(i0);
+    const Vowel& a = vowelTable(path[i0]);
+    const Vowel& b = vowelTable(path[i1]);
+    Vowel v;
+    v.f1 = lerpf(a.f1, b.f1, t) * octave;
+    v.f2 = lerpf(a.f2, b.f2, t) * octave;
+    v.f3 = lerpf(a.f3, b.f3, t) * octave;
+    return v;
+}
+
+// Parallel band-pass formant bank (3 resonant peaks) — the vocal filter.
+struct FormantBank {
+    Biquad bp1, bp2, bp3;
+    float g1 = 1.0f, g2 = 0.72f, g3 = 0.42f;
+    void set(float f1, float f2, float f3, double q, double sr) {
+        bp1.setBandpass(clampd(f1, 90.0, sr * 0.45), q, sr);
+        bp2.setBandpass(clampd(f2, 120.0, sr * 0.45), q * 0.9, sr);
+        bp3.setBandpass(clampd(f3, 150.0, sr * 0.45), q * 0.8, sr);
+    }
+    float process(float x) {
+        return g1 * bp1.process(x) + g2 * bp2.process(x) + g3 * bp3.process(x);
+    }
+};
+
+// ------------------------------------------------------------------ shape/step LFO
+// Rhythmic modulator: sine/tri/ramp-up/ramp-down/square/stepped-S&H. The stepped
+// mode uses a deterministic per-voice pattern of `steps` values (repeats each
+// cycle) for musical, "talking" movement rather than a plain sine wobble.
+struct ShapeLFO {
+    double phase = 0.0, inc = 0.0;
+    int shape = 0;   // 0 sine,1 tri,2 rampUp,3 rampDown,4 square,5 stepped S&H
+    int steps = 4;
+    std::vector<float> pat;   // stepped pattern (bipolar)
+    void init(double hz, double sr, int shp, int stepCount, uint64_t seed) {
+        inc = (sr > 0.0) ? hz / sr : 0.0;
+        shape = shp;
+        steps = std::max(1, stepCount);
+        phase = 0.0;
+        pat.resize(size_t(steps));
+        Rng r(seed ? seed : 1);
+        for (auto& x : pat) x = float(r.uniform() * 2.0 - 1.0);
+    }
+    void reset(double p = 0.0) { phase = p; }
+    float tick() {
+        float v;
+        switch (shape) {
+            case 1: v = float(4.0 * std::fabs(phase - 0.5) - 1.0); break; // tri
+            case 2: v = float(2.0 * phase - 1.0); break;                  // ramp up
+            case 3: v = float(1.0 - 2.0 * phase); break;                  // ramp down
+            case 4: v = phase < 0.5 ? 1.0f : -1.0f; break;               // square
+            case 5: {                                                     // stepped
+                int s = int(phase * steps); if (s >= steps) s = steps - 1;
+                v = pat[size_t(s)]; break;
+            }
+            default: v = float(std::sin(kTwoPi * phase)); break;          // sine
+        }
+        phase += inc; if (phase >= 1.0) phase -= 1.0;
+        return v;
+    }
+};
+
+// ------------------------------------------------------------------ envelope follower
+struct EnvFollow {
+    float env = 0.0f, atkA = 0.0f, relA = 0.0f;
+    void set(float atk, float rel, double sr) { atkA = envCoef(atk, sr); relA = envCoef(rel, sr); }
+    float tick(float x) {
+        float a = std::fabs(x);
+        env = (a > env) ? a + (env - a) * atkA : a + (env - a) * relA;
+        return env;
+    }
+};
+
+// ------------------------------------------------------------------ OTT-lite (3-band)
+// Compact upward/downward multiband compressor: pulls each band's level toward a
+// target, gluing the sound and pushing the formant mids forward. amount 0..1.
+struct OTTLite {
+    Split3 split;
+    EnvFollow eLo, eMid, eHi;
+    float amount = 0.3f;
+    void set(double sr, float amt) {
+        split.set(180.0, 1500.0, sr);
+        eLo.set(0.010f, 0.10f, sr);
+        eMid.set(0.005f, 0.06f, sr);
+        eHi.set(0.002f, 0.04f, sr);
+        amount = clampf(amt, 0.0f, 1.0f);
+    }
+    static float comp(EnvFollow& e, float x, float amt, float target) {
+        float env = e.tick(x); if (env < 1e-5f) env = 1e-5f;
+        float g = std::pow(target / env, amt);
+        g = clampf(g, 0.30f, 3.5f);
+        return x * g;
+    }
+    float process(float x) {
+        float lo, mid, hi; split.split(x, lo, mid, hi);
+        return comp(eLo, lo, amount * 0.55f, 0.22f)
+             + comp(eMid, mid, amount, 0.25f)
+             + comp(eHi, hi, amount * 0.75f, 0.20f);
     }
 };
 

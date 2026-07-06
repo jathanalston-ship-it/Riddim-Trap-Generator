@@ -101,7 +101,7 @@ Features analyze(const StereoBuffer& audio, double sampleRate) {
             else if (fq < 500.0) eLow += p2;
             else if (fq < 3000.0) eMid += p2;
             else eHigh += p2;
-            if (fq >= 200.0 && fq <= 3000.0) wb += p2;
+            if (fq >= 300.0 && fq <= 2500.0) wb += p2;  // vocal "talk" band
         }
         wob.push_back(wb);
         frameMag.push_back(std::sqrt(fe));
@@ -175,17 +175,21 @@ float rate(Role role, const Features& f) {
     const float c = f.centroidHz;
     switch (role) {
         case Role::Growl:
+            // Reward the vocal "talk": moving spectral peaks in 300-2500 Hz,
+            // mid-high presence, vocal centroid; penalize static + sub-heavy.
             return blend({
-                {rampUp(f.movement, 0.12f, 0.35f), 1.0f},
-                {band(c, 300.0f, 1800.0f, 300.0f), 1.0f},
-                {rampDown(f.subRatio, 0.40f, 0.65f), 0.8f},
-                {band(f.crestDb, 6.0f, 14.0f, 4.0f), 0.7f},
+                {rampUp(f.movement, 0.15f, 0.40f), 1.3f},          // peaks that MOVE
+                {band(f.aggression, 0.28f, 0.75f, 0.18f), 0.9f},   // 600-2500 presence proxy
+                {band(c, 380.0f, 1900.0f, 350.0f), 0.9f},          // vocal centroid
+                {rampDown(f.subRatio, 0.40f, 0.60f), 1.0f},        // penalize >0.5 sub
+                {band(f.crestDb, 5.0f, 15.0f, 5.0f), 0.5f},
             });
         case Role::Screech:
             return blend({
                 {band(c, 1500.0f, 6000.0f, 1200.0f), 1.0f},
+                {rampUp(f.movement, 0.15f, 0.42f), 0.9f},          // vocal scream, not static ring
                 {rampDown(f.subRatio, 0.25f, 0.5f), 0.8f},
-                {rampUp(f.movement, 0.1f, 0.4f), 0.5f},
+                {band(f.aggression, 0.30f, 0.80f, 0.18f), 0.6f},
                 {band(f.crestDb, 5.0f, 16.0f, 5.0f), 0.5f},
             });
         case Role::Sub:
