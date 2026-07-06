@@ -27,6 +27,33 @@ constexpr float kLaneGainDb[kLaneCount] = {
     /*Downlifter*/ -12.5f, /*Impact*/ -8.0f, /*Crash*/ -12.0f,
 };
 
+// --- Depth send/tilt tables (parallel to kLaneGainDb) ----------------------
+// Per-lane send levels (linear 0..1) into the two shared depth reverb buses.
+// NEAR = short/bright room (glue for drums/perc); FAR = long/dark room (pushes
+// music/atmos to the back). Sub/Bass/Kick get ZERO send — time effects never
+// touch sub/low-mid energy (the returns are also band-limited on the way back).
+constexpr float kSendNear[kLaneCount] = {
+    /*Sub*/ 0.f, /*BassA*/ 0.f, /*BassB*/ 0.f, /*BassC*/ 0.f,
+    /*Kick*/ 0.f, /*Snare*/ 0.18f, /*HatClosed*/ 0.05f, /*HatOpen*/ 0.08f,
+    /*Perc*/ 0.16f, /*Melody*/ 0.10f, /*Pad*/ 0.05f, /*Riser*/ 0.05f,
+    /*Downlifter*/ 0.04f, /*Impact*/ 0.02f, /*Crash*/ 0.10f,
+};
+constexpr float kSendFar[kLaneCount] = {
+    /*Sub*/ 0.f, /*BassA*/ 0.f, /*BassB*/ 0.f, /*BassC*/ 0.f,
+    /*Kick*/ 0.f, /*Snare*/ 0.05f, /*HatClosed*/ 0.f, /*HatOpen*/ 0.03f,
+    /*Perc*/ 0.05f, /*Melody*/ 0.22f, /*Pad*/ 0.30f, /*Riser*/ 0.22f,
+    /*Downlifter*/ 0.14f, /*Impact*/ 0.f, /*Crash*/ 0.20f,
+};
+// Front/back spectral tilt: a subtle per-lane high-shelf (dB @ ~7 kHz) applied
+// to the dry lane. Negative = darker/recedes (pads, risers, downlifters);
+// slightly positive = present/forward (kick, snare).
+constexpr float kDepthTiltDb[kLaneCount] = {
+    /*Sub*/ 0.f, /*BassA*/ 0.f, /*BassB*/ 0.f, /*BassC*/ 0.f,
+    /*Kick*/ 0.5f, /*Snare*/ 0.6f, /*HatClosed*/ 0.f, /*HatOpen*/ 0.f,
+    /*Perc*/ 0.f, /*Melody*/ 0.f, /*Pad*/ -2.5f, /*Riser*/ -2.0f,
+    /*Downlifter*/ -2.5f, /*Impact*/ 0.f, /*Crash*/ -1.0f,
+};
+
 // Deterministic ducking envelope from note onsets (gain multiplier, 1 = open).
 std::vector<float> buildDuckEnv(const std::vector<Note>& notes, size_t N, double spb,
                                 double sr, double atkMs, double holdMs, double relSec,
@@ -153,6 +180,8 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
         size_t m = std::min(N, src.size());
         for (size_t i = 0; i < m; ++i) { b.l[i] = src.l[i]; b.r[i] = src.r[i]; }
         b.applyGain(dbToGain(kLaneGainDb[int(l)]));
+        const float tilt = kDepthTiltDb[int(l)];      // front/back spectral tilt
+        if (std::fabs(tilt) > 0.01f) applyStereo(makeHighShelf(sr, 7000.0, tilt), b);
         return b;
     };
 
@@ -163,6 +192,34 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
     std::vector<float> snareDuck = buildDuckEnv(score.notes(Lane::Snare), N, spb, sr, 2.0, 40.0, relSec, dbToGain(-2.0f));
 
     StereoBuffer mix(N);
+
+    // --- Depth send accumulators -------------------------------------------
+    // Per-lane audio is tapped into these two reverb-send buses (and a small
+    // ping-pong "throw" bus) as each lane is processed, so the shared depth
+    // buses are rendered ONCE later. A baseline space is always present and
+    // swells in breaks/intros via the per-beat fxSend curve (spaceMod).
+    StereoBuffer nearSend(N), farSend(N), throwSend(N);
+    std::vector<float> spaceMod(N);
+    for (size_t i = 0; i < N; ++i) {
+        double beat = (double(i) / sr) / spb;
+        float s = std::clamp(score.fxSend.sample(beat), 0.0f, 1.0f);
+        spaceMod[i] = 0.7f + 0.6f * s;                // 0.7 baseline .. 1.3 in breaks
+    }
+    auto addSend = [&](const StereoBuffer& b, Lane l) {
+        const float sn = kSendNear[int(l)], sf = kSendFar[int(l)];
+        if (sn <= 0.f && sf <= 0.f) return;
+        for (size_t i = 0; i < N; ++i) {
+            const float m = spaceMod[i];
+            nearSend.l[i] += b.l[i] * sn * m; nearSend.r[i] += b.r[i] * sn * m;
+            farSend.l[i]  += b.l[i] * sf * m; farSend.r[i]  += b.r[i] * sf * m;
+        }
+    };
+    auto addThrow = [&](const StereoBuffer& b, float w) {
+        for (size_t i = 0; i < N; ++i) {
+            const float m = spaceMod[i];
+            throwSend.l[i] += b.l[i] * w * m; throwSend.r[i] += b.r[i] * w * m;
+        }
+    };
 
     // --- SUB bus -----------------------------------------------------------
     StereoBuffer subBus(N);
@@ -188,7 +245,7 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
     if (anyBass) {
         tanhSaturate(bassBus, 1.0 + 2.0 * plan.mixAggression);
         ottLite(bassBus, sr, 120.0, 2500.0, 0.25 + 0.35 * plan.mixAggression);
-        applyWidth(bassBus, 0.25f);
+        applyWidth(bassBus, 0.30f);   // a touch of upper-bass stereo interest
         sweepFilter(bassBus, sr, spb, true, [&](double beat) {
             return std::max(20.0, double(score.buildFilter.sample(beat)) * 400.0);
         });
@@ -209,6 +266,8 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
     if (has(Lane::Snare)) {
         snareBuf = laneBuf(Lane::Snare);
         addToDrums(snareBuf);
+        addSend(snareBuf, Lane::Snare);
+        addThrow(snareBuf, 0.05f);                    // section-tail throws (via spaceMod)
     }
     for (Lane hl : {Lane::HatClosed, Lane::HatOpen}) {
         if (!has(hl)) continue;
@@ -216,11 +275,13 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
         applyStereo(makeHighpass(sr, 300.0), b);
         applyWidth(b, 0.7f);
         addToDrums(b);
+        addSend(b, hl);
     }
     if (has(Lane::Perc)) {
         StereoBuffer b = laneBuf(Lane::Perc);
         applyStereo(makeHighpass(sr, 300.0), b);
         addToDrums(b);
+        addSend(b, Lane::Perc);
     }
 
     // --- MUSIC bus ---------------------------------------------------------
@@ -232,6 +293,8 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
         applyStereo(makeHighpass(sr, 200.0), b);
         applyEnv(b, snareDuck);                              // snare ducks melody lightly
         for (size_t i = 0; i < N; ++i) { musicBus.l[i] += b.l[i]; musicBus.r[i] += b.r[i]; }
+        addSend(b, Lane::Melody);
+        addThrow(b, 0.11f);                                  // melody ping-pong throws
     }
     StereoBuffer padBuf(N);
     if (has(Lane::Pad)) {
@@ -241,8 +304,9 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
         applyStereo(makeLowpass(sr, 9000.0), padBuf);
         applyEnv(padBuf, kickDuck);                          // kick ducks pad
         applyEnv(padBuf, snareDuck);                         // snare ducks pad lightly
-        applyWidth(padBuf, 0.85f);
+        applyWidth(padBuf, 0.95f);                           // slightly wider pad
         for (size_t i = 0; i < N; ++i) { musicBus.l[i] += padBuf.l[i]; musicBus.r[i] += padBuf.r[i]; }
+        addSend(padBuf, Lane::Pad);
     }
     if (has(Lane::Melody) || has(Lane::Pad)) {
         sweepFilter(musicBus, sr, spb, true, [&](double beat) {
@@ -260,13 +324,23 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
         applyStereo(makeHighpass(sr, 150.0), b);
         applyWidth(b, 0.85f);
         addToFx(b);
+        addSend(b, Lane::Riser);                             // riser tails pushed back
     }
-    if (has(Lane::Downlifter)) addToFx(laneBuf(Lane::Downlifter));
-    if (has(Lane::Impact)) addToFx(laneBuf(Lane::Impact));
+    if (has(Lane::Downlifter)) {
+        StereoBuffer b = laneBuf(Lane::Downlifter);
+        addToFx(b);
+        addSend(b, Lane::Downlifter);
+    }
+    if (has(Lane::Impact)) {
+        StereoBuffer b = laneBuf(Lane::Impact);
+        addToFx(b);
+        addSend(b, Lane::Impact);
+    }
     if (has(Lane::Crash)) {
         StereoBuffer b = laneBuf(Lane::Crash);
         applyWidth(b, 0.7f);
         addToFx(b);
+        addSend(b, Lane::Crash);
     }
 
     // --- Drum-bus section automation (build last-bar dip + break softening) -
@@ -299,19 +373,68 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
         mix.r[i] = subBus.r[i] + bassBus.r[i] + drumBus.r[i] + musicBus.r[i] + fxBus.r[i];
     }
 
-    // --- fxSend diffusion (Melody/Pad/Snare/FX -> cheap reverb, subtle) -----
+    // --- Depth: dual reverb buses (near/far) + ping-pong throws ------------
+    // Two shared, band-limited reverb buses build front-to-back space. NEAR is
+    // a short/bright room that glues drums & percussion; FAR is a long/dark
+    // room that pushes music, risers and crash tails to the back. Both returns
+    // are HP'd (>=200 Hz) + LP'd and kick-ducked so tails never smear the
+    // groove or fight the sub. Each bus is processed ONCE (sends summed in).
     {
-        Diffuser diff; diff.init(sr);
+        // Slower-release kick duck for the wet tails (swell up in the gaps).
+        const double verbRelSec = spb * 0.45;
+        std::vector<float> verbDuck = buildDuckEnv(score.notes(Lane::Kick), N, spb, sr,
+                                                   4.0, 30.0, verbRelSec, dbToGain(-4.5f));
+
+        // NEAR bus: short, bright, small room.
+        StereoBuffer nearWet(N);
+        {
+            RoomVerb rv; rv.init(sr, /*preMs*/ 6.0, /*fb*/ 0.70f, /*damp*/ 0.45f, /*size*/ 0.72);
+            for (size_t i = 0; i < N; ++i) {
+                float x = 0.5f * (nearSend.l[i] + nearSend.r[i]);
+                float wl, wr; rv.process(x, wl, wr);
+                nearWet.l[i] = wl; nearWet.r[i] = wr;
+            }
+            applyStereo(makeHighpass(sr, 200.0), nearWet);   // keep lows out of the verb
+            applyStereo(makeLowpass(sr, 9000.0), nearWet);   // bright but not harsh
+            applyEnv(nearWet, verbDuck);
+            applyWidth(nearWet, 1.15f);
+        }
+
+        // FAR bus: long, dark, big room.
+        StereoBuffer farWet(N);
+        {
+            RoomVerb rv; rv.init(sr, /*preMs*/ 26.0, /*fb*/ 0.85f, /*damp*/ 0.62f, /*size*/ 1.25);
+            for (size_t i = 0; i < N; ++i) {
+                float x = 0.5f * (farSend.l[i] + farSend.r[i]);
+                float wl, wr; rv.process(x, wl, wr);
+                farWet.l[i] = wl; farWet.r[i] = wr;
+            }
+            applyStereo(makeHighpass(sr, 220.0), farWet);    // protect low-mids
+            applyStereo(makeLowpass(sr, 7000.0), farWet);    // darker = further back
+            applyEnv(farWet, verbDuck);
+            applyWidth(farWet, 1.30f);
+        }
+
+        // Ping-pong throws: small, band-limited rhythmic depth from melody and
+        // section-tail snare (already weighted into throwSend via spaceMod).
+        StereoBuffer ppWet(N);
+        {
+            PingPong pp; pp.init(sr, /*msL*/ 190.0, /*msR*/ 285.0, /*fb*/ 0.33f);
+            for (size_t i = 0; i < N; ++i) {
+                float x = 0.5f * (throwSend.l[i] + throwSend.r[i]);
+                float wl, wr; pp.process(x, wl, wr);
+                ppWet.l[i] = wl; ppWet.r[i] = wr;
+            }
+            applyStereo(makeHighpass(sr, 220.0), ppWet);
+            applyStereo(makeLowpass(sr, 6000.0), ppWet);
+            applyEnv(ppWet, verbDuck);
+        }
+
+        // Sum ducked, band-limited wet into the mix (modest, additive levels).
+        const float nearGain = 0.90f, farGain = 0.80f, ppGain = 0.45f;
         for (size_t i = 0; i < N; ++i) {
-            double beat = (double(i) / sr) / spb;
-            float send = score.fxSend.sample(beat) * 0.18f;
-            if (send <= 1e-5f) { diff.process(0.0f); continue; }
-            float srcMono = 0.5f * (musicBus.l[i] + musicBus.r[i])
-                          + 0.5f * (fxBus.l[i] + fxBus.r[i])
-                          + 0.5f * (snareBuf.l[i] + snareBuf.r[i]);
-            float wet = diff.process(srcMono * send);
-            mix.l[i] += wet;
-            mix.r[i] += wet;
+            mix.l[i] += nearWet.l[i] * nearGain + farWet.l[i] * farGain + ppWet.l[i] * ppGain;
+            mix.r[i] += nearWet.r[i] * nearGain + farWet.r[i] * farGain + ppWet.r[i] * ppGain;
         }
     }
 

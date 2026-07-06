@@ -85,7 +85,24 @@ track_b.wav                     -9.1    8.7   0.41  0.22  0.20  0.11  0.06     5
 | `crestDb` | Peak-to-RMS over the loudest sections | Reported (informational) |
 | `dropBreakContrastLu` | Loud vs. quiet energy contrast | Reported (informational) |
 | `stereoWidth` | Side/mid RMS ratio | Reported (informational) |
+| `growlOdd` | Odd-harmonic fraction of the loud bass (0–1; a square wave is odd-dominant, ~>0.7) | Biases the riddim growl toward a square source (`srcMorph`/`carMix`) |
+| `growlWobbleHz` | Dominant wobble/gate rate of the growl band (Hz) | Biases the growl's tempo-synced gate division (`gateDiv`/`gateDepth`) |
+| `growlCentroidHz` | Spectral centroid of the growl band (Hz, brightness) | Biases the growl's body filter + high shelf (`lpMul`/`highShelfDb`) |
 | `refCount` | How many references were aggregated | Reported |
+
+### Growl matching (reading a reference's bass)
+
+Beyond the overall mix balance, the analyzer measures a small **growl
+fingerprint** from the loudest bass sections of each reference: how *square*
+(odd-harmonic) the bass is, how fast it *wobbles*, and how *bright* it is. When a
+riddim calibration is active, the growl synth nudges its freshly-drawn recipe
+toward those numbers — so calibrating to a hard, square, 16th-note-wobbling
+reference makes newly-generated (and A/B-trainer) riddim growls lean the same
+way. The nudge is applied **after** the recipe's random draws, so it never breaks
+determinism: the same seed with the same `calibration.json` still renders an
+identical file. Like every other calibration adjustment it is **clamped** to a
+musical range, so an extreme reference colors the growl without ever destabilizing
+it.
 
 Every engine adjustment is **clamped**, so an unusual reference can shift the
 sound but can never break the output: loudness stays in a sane window, tilt and

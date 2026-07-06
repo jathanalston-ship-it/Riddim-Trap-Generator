@@ -52,9 +52,9 @@ int runAnalyze(const std::string& folder, bool genreGiven, Genre genre,
     }
 
     std::printf("[rtg] analyzing %d reference file(s) in %s\n", (int)files.size(), folder.c_str());
-    std::printf("%-28s %7s %6s  %5s %5s %5s %5s %5s  %6s %6s %6s\n",
+    std::printf("%-28s %7s %6s  %5s %5s %5s %5s %5s  %6s %6s %6s  %5s %7s %6s\n",
                 "file", "LUFS", "crest", "sub", "loM", "mid", "hiM", "hi",
-                "contr", "tilt", "width");
+                "contr", "tilt", "width", "odd", "wob", "cen");
 
     std::vector<RefMeasurement> measurements;
     int ok = 0;
@@ -70,9 +70,10 @@ int runAnalyze(const std::string& folder, bool genreGiven, Genre genre,
 
         std::string name = p.filename().string();
         if (name.size() > 27) name = name.substr(0, 27);
-        std::printf("%-28s %7.1f %6.1f  %5.2f %5.2f %5.2f %5.2f %5.2f  %6.1f %6.2f %6.2f\n",
+        std::printf("%-28s %7.1f %6.1f  %5.2f %5.2f %5.2f %5.2f %5.2f  %6.1f %6.2f %6.2f  %5.2f %6.1f %6.0f\n",
                     name.c_str(), m.lufs, m.crestDb, m.bands[0], m.bands[1], m.bands[2],
-                    m.bands[3], m.bands[4], m.contrastLu, m.tiltDbPerOct, m.width);
+                    m.bands[3], m.bands[4], m.contrastLu, m.tiltDbPerOct, m.width,
+                    m.growlOdd, m.growlWobbleHz, m.growlCentroidHz);
     }
     if (ok == 0) { std::printf("[rtg] no readable references — nothing written\n"); return 3; }
 
@@ -80,10 +81,10 @@ int runAnalyze(const std::string& folder, bool genreGiven, Genre genre,
     CalibrationProfile prof = Calibration::aggregate(measurements);
 
     std::printf("[rtg] aggregate (median of %d): LUFS=%.1f crest=%.1f bands=[%.2f %.2f %.2f %.2f %.2f] "
-                "contrast=%.1f tilt=%.2f width=%.2f\n",
+                "contrast=%.1f tilt=%.2f width=%.2f odd=%.2f wob=%.1fHz cen=%.0fHz\n",
                 ok, prof.targetLufs, prof.crestDb, prof.bands[0], prof.bands[1], prof.bands[2],
                 prof.bands[3], prof.bands[4], prof.dropBreakContrastLu, prof.spectralTiltDbPerOct,
-                prof.stereoWidth);
+                prof.stereoWidth, prof.growlOdd, prof.growlWobbleHz, prof.growlCentroidHz);
 
     // Merge into existing calibration (preserve the other genre if present).
     Calibration cal;

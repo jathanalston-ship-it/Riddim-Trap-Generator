@@ -1,6 +1,7 @@
 #include "GenerationController.h"
 
 #include <atomic>
+#include <cmath>
 #include <ctime>
 #include <memory>
 #include <mutex>
@@ -209,6 +210,13 @@ struct GenerationController::Impl {
     void applyTrainingPair(rtg::StereoBuffer a, rtg::StereoBuffer b,
                            rtg::Features fA, rtg::Features fB,
                            rtg::Genre g, std::string roleName) {
+        // Detach the preview transport from the OLD train sources before we
+        // reallocate their backing buffers and destroy the sources. Playing A
+        // or B and then voting re-renders immediately; without this the audio
+        // thread can read a freed MemoryAudioSource / reallocated AudioBuffer
+        // (use-after-free crash). Mirrors applyPreview's detach-first order.
+        previewTransport.stop();
+        previewTransport.setSource(nullptr);
         fillBuffer(trainBufferA, a);
         fillBuffer(trainBufferB, b);
         trainSourceA = std::make_unique<juce::MemoryAudioSource>(trainBufferA, false, false);
@@ -299,7 +307,15 @@ struct GenerationController::Impl {
         std::vector<float> inL((size_t) n), inR((size_t) n);
         const float* c0 = tmp.getReadPointer(0);
         const float* c1 = numCh > 1 ? tmp.getReadPointer(1) : c0;
-        for (int i = 0; i < n; ++i) { inL[(size_t) i] = c0[i]; inR[(size_t) i] = c1[i]; }
+        // Sanitize to finite samples. 32-bit-float reference files (rendered
+        // stems, broken exports) can legitimately carry NaN/Inf; if those reach
+        // the analyzer's std::sort comparators (calibration.cpp makeGrid), the
+        // invalid ordering drives libstdc++ introsort out of bounds and crashes.
+        for (int i = 0; i < n; ++i) {
+            float l = c0[i], r = c1[i];
+            inL[(size_t) i] = std::isfinite(l) ? l : 0.0f;
+            inR[(size_t) i] = std::isfinite(r) ? r : 0.0f;
+        }
 
         if (std::abs(srcRate - 48000.0) < 1.0) {          // already 48 kHz
             out.resize((size_t) n);
@@ -337,17 +353,30 @@ struct GenerationController::Impl {
             const int total = files.size();
             for (int i = 0; i < total; ++i) {
                 const juce::File& f = files.getReference(i);
-                self->setRefStatus("Analyzing " + f.getFileName()
-                                   + "  (" + juce::String(i + 1) + "/" + juce::String(total) + ")");
+                // Push status + progress to the UI via the alive-guarded message
+                // thread rather than dereferencing `self` on this detached worker:
+                // if the controller is destroyed mid-analysis, the guard no-ops
+                // instead of touching freed memory.
+                juce::String status = "Analyzing " + f.getFileName()
+                                    + "  (" + juce::String(i + 1) + "/" + juce::String(total) + ")";
                 { std::weak_ptr<bool> a = alive; Impl* s = self;
-                  juce::MessageManager::callAsync([a, s] { if (!a.expired()) s->owner.sendChangeMessage(); }); }
+                  juce::MessageManager::callAsync([a, s, status] {
+                      if (a.expired()) return;
+                      s->setRefStatus(status);
+                      s->owner.sendChangeMessage();
+                  }); }
 
                 rtg::StereoBuffer buf;
                 if (Impl::decodeFileTo48k(fmt, f, buf) && !buf.empty())
                     measurements.push_back(rtg::Calibration::measureReference(buf, 48000.0));
                 else
                     skipped.add(f.getFileName());
-                self->refProgress.store(float(i + 1) / float(juce::jmax(1, total)));
+
+                const float prog = float(i + 1) / float(juce::jmax(1, total));
+                { std::weak_ptr<bool> a = alive; Impl* s = self;
+                  juce::MessageManager::callAsync([a, s, prog] {
+                      if (!a.expired()) s->refProgress.store(prog);
+                  }); }
             }
 
             juce::String result;

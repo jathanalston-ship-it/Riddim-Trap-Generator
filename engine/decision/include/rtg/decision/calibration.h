@@ -36,6 +36,9 @@ struct CalibrationProfile {
     float dropBreakContrastLu = 6.0f;      // loud-25% ST mean minus quiet-40% gated mean
     float spectralTiltDbPerOct = -3.0f;    // linear fit, 60 Hz..10 kHz
     float stereoWidth = 0.30f;             // side/mid RMS ratio
+    float growlOdd        = 0.6f;    // odd-harmonic fraction of the loud bass, 0..1 (square wave => high, ~>0.7)
+    float growlWobbleHz   = 0.0f;    // dominant growl-band envelope-modulation (wobble/gate) rate, Hz; 0 = unknown
+    float growlCentroidHz = 2200.0f; // growl-band (120-8kHz) spectral centroid, Hz (brightness)
     int   refCount = 0;                    // number of reference files aggregated
 };
 
@@ -49,6 +52,9 @@ struct RefMeasurement {
     float contrastLu = 6.0f;
     float tiltDbPerOct = -3.0f;
     float width = 0.30f;
+    float growlOdd        = 0.6f;    // odd-harmonic fraction of the loud bass, 0..1 (square wave => high, ~>0.7)
+    float growlWobbleHz   = 0.0f;    // dominant growl-band envelope-modulation (wobble/gate) rate, Hz; 0 = unknown
+    float growlCentroidHz = 2200.0f; // growl-band (120-8kHz) spectral centroid, Hz (brightness)
 };
 
 // Selector for assignProfile / the analyzer: which slot a freshly aggregated
@@ -118,5 +124,13 @@ float measureSpectralTiltDbPerOct(const StereoBuffer& audio, double sampleRate);
 
 // Side/mid RMS ratio (0 = mono, larger = wider).
 float measureStereoWidth(const StereoBuffer& audio);
+
+// Growl-bass character fingerprint (analysis-only). Measured over the single
+// loudest ~4 s window: odd-harmonic fraction of the fundamental (square-ness),
+// growl-band envelope wobble/gate rate (Hz), and growl-band spectral centroid
+// (brightness). All hand-rolled DSP (autocorrelation + Goertzel + biquad
+// filterbank); no FFT, no JUCE. Degenerate/short input returns the defaults.
+struct GrowlFingerprint { float odd = 0.6f; float wobbleHz = 0.0f; float centroidHz = 2200.0f; };
+GrowlFingerprint measureGrowlFingerprint(const StereoBuffer& audio, double sampleRate);
 
 } // namespace rtg

@@ -247,4 +247,89 @@ struct Diffuser {
     }
 };
 
+// ---------------------------------------------------------------------------
+// Pre-delay: a fixed ms->samples ring-buffer delay. Feeding a reverb through a
+// pre-delay separates the dry transient from the wet tail — a strong
+// front/back depth cue (short = near, longer = far/back of the room).
+// ---------------------------------------------------------------------------
+struct PreDelay {
+    std::vector<float> buf; size_t idx = 0;
+    void init(double fs, double ms) {
+        size_t len = std::max<size_t>(1, size_t(ms * fs / 1000.0));
+        buf.assign(len, 0.f); idx = 0;
+    }
+    inline float process(float x) {
+        float y = buf[idx];
+        buf[idx] = x;
+        if (++idx >= buf.size()) idx = 0;
+        return y;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// RoomVerb: a stereo Schroeder reverb wrapper with a pre-delay in front and
+// tunable decay (comb feedback) / damping / size. The L and R tanks use
+// slightly different comb + allpass lengths and pre-delays so the wet output is
+// naturally decorrelated (wide) without any randomness. Used to build the two
+// shared depth buses (a short bright "near" room and a long dark "far" room).
+// Band-limiting of the wet output is done by the caller.
+// ---------------------------------------------------------------------------
+struct RoomVerb {
+    PreDelay preL, preR;
+    Comb cL0, cL1, cL2, cR0, cR1, cR2;
+    Allpass aL0, aL1, aR0, aR1;
+    // preMs: pre-delay (front/back cue). feedback: decay (0..~0.9, stays <1).
+    // damp: HF damping in the feedback loop (bigger = darker). size: comb-length
+    // scale (bigger = longer/darker room).
+    void init(double fs, double preMs, float feedback, float damp, double size) {
+        feedback = std::min(std::max(feedback, 0.f), 0.92f);
+        damp = std::min(std::max(damp, 0.f), 0.95f);
+        preL.init(fs, std::max(0.1, preMs));
+        preR.init(fs, std::max(0.1, preMs * 1.18)); // decorrelate L/R pre-delay
+        double k = fs / 44100.0 * std::max(0.2, size);
+        cL0.init(size_t(1116 * k), feedback, damp);
+        cL1.init(size_t(1277 * k), feedback, damp);
+        cL2.init(size_t(1491 * k), feedback, damp);
+        cR0.init(size_t(1139 * k), feedback, damp); // detuned right tank
+        cR1.init(size_t(1301 * k), feedback, damp);
+        cR2.init(size_t(1517 * k), feedback, damp);
+        aL0.init(size_t(556 * k), 0.5f); aL1.init(size_t(441 * k), 0.5f);
+        aR0.init(size_t(571 * k), 0.5f); aR1.init(size_t(457 * k), 0.5f);
+    }
+    inline void process(float x, float& outL, float& outR) {
+        float xl = preL.process(x);
+        float xr = preR.process(x);
+        float sl = (cL0.process(xl) + cL1.process(xl) + cL2.process(xl)) * 0.333f;
+        sl = aL1.process(aL0.process(sl));
+        float sr = (cR0.process(xr) + cR1.process(xr) + cR2.process(xr)) * 0.333f;
+        sr = aR1.process(aR0.process(sr));
+        outL = sl; outR = sr;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// PingPong: a simple tempo-free stereo delay. A mono input feeds the left tap;
+// the left delayed output crosses into the right tap; the right output feeds
+// back into the left with `fb` (<1). Fixed ms taps (deterministic). Used for
+// small, band-limited rhythmic "throws" on melody / section-tail snare.
+// ---------------------------------------------------------------------------
+struct PingPong {
+    std::vector<float> bufL, bufR; size_t idxL = 0, idxR = 0; float fb = 0.33f;
+    void init(double fs, double msL, double msR, float feedback) {
+        bufL.assign(std::max<size_t>(1, size_t(std::max(0.1, msL) * fs / 1000.0)), 0.f);
+        bufR.assign(std::max<size_t>(1, size_t(std::max(0.1, msR) * fs / 1000.0)), 0.f);
+        idxL = idxR = 0;
+        fb = std::min(std::max(feedback, 0.f), 0.85f);
+    }
+    inline void process(float x, float& outL, float& outR) {
+        float yL = bufL[idxL];
+        float yR = bufR[idxR];
+        bufL[idxL] = x + yR * fb;   // input + feedback from the right tap
+        bufR[idxR] = yL;            // left output bounces to the right tap
+        if (++idxL >= bufL.size()) idxL = 0;
+        if (++idxR >= bufR.size()) idxR = 0;
+        outL = yL; outR = yR;
+    }
+};
+
 } // namespace rtg::mixdsp

@@ -10,6 +10,7 @@
 #include <array>
 #include <cmath>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace rtg {
@@ -18,41 +19,32 @@ namespace {
 constexpr double BPB = 4.0; // beats per bar
 
 // ---------------------------------------------------------------------------
-// Bass rhythm archetypes on a 1-bar 1/8 grid (8 slots). Rests are first-class:
-// halftime feel, weighted toward space. Slot i == beat i*0.5. Genuinely
-// distinct families so per-drop skeleton choice reshapes the groove: halftime
-// stomps, syncopated pickups, gap-heavy "silence riddim", double-time response,
-// triplet-leaning clusters.
 struct Archetype { const char* pat; double weight; };
-const Archetype kBassBank[] = {
-    // classic call/response
-    { "X.X...X.", 1.4 },
-    { "X...X.X.", 1.2 },
-    { "X.X.X...", 1.0 },
-    { "X..X..X.", 1.0 },
-    // busier / double-time response
-    { "XX..X.X.", 0.8 },
-    { "X.XX..X.", 0.7 },
-    { "X.X.X.X.", 0.5 },
-    { "X.XXX...", 0.55 }, // double-time cluster front
-    { "X...XX.X", 0.6 },  // double-time response tail
-    // halftime stomps (very sparse, heavy)
-    { "X.......", 0.6 },
-    { "X.....X.", 0.7 },
-    { "X......X", 0.55 },
-    // gap-heavy "silence riddim"
-    { "X...X...", 0.8 },
-    { "X..X....", 0.7 },
-    { "X....X..", 0.7 },
-    // syncopated pickups
-    { "X.X..X.X", 0.6 },
-    { "XX.X..X.", 0.55 },
-    { "X..XX.X.", 0.6 },
-    // triplet-leaning approximations on the 1/8 grid
-    { "XXX.X...", 0.5 },
-    { "X.XX.XX.", 0.45 },
+
+// Riddim bass — the signature bounce on a 1-bar 1/16 grid (16 steps, step i ==
+// beat i*0.25). Rests are first-class: step 0 (the kick's downbeat) and step 8
+// (the beat-3 halftime snare) are kept clear so the bass ANSWERS around the
+// kick and snare, leaning into space. Off-beat / "e-&-a" stabs dominate;
+// clustered bursts then rests, ~40-55% density. These are the CALL patterns;
+// the response bar mutates them.
+const Archetype kRiddim16Bank[] = {
+    { "..X..X.X..X..X.X", 1.4 }, // classic answer-the-kick bounce
+    { "..X.X..X..X.X..X", 1.3 }, // driving off-beats, gap at beat 3
+    { "...X..X...X..X.X", 1.0 }, // sparse, late answers
+    { "..XX...X..XX...X", 1.0 }, // paired-stab bursts
+    { "..X.X.X...X.X.X.", 0.8 }, // busier gallop
+    { "..X..XX...X..XX.", 0.8 }, // double-stab clusters
 };
-constexpr int kBassBankN = int(sizeof(kBassBank) / sizeof(kBassBank[0]));
+constexpr int kRiddim16BankN = int(sizeof(kRiddim16Bank) / sizeof(kRiddim16Bank[0]));
+
+// Riddim triplet-feel option — a 1-bar 12-step grid (step i == beat i/3) for a
+// shuffle/triplet bounce. Gaps at beats 1 & 3 (steps 0 and 6).
+const Archetype kRiddim12Bank[] = {
+    { ".XX..X.XX..X", 1.2 },
+    { ".X..XX..X.X.", 1.0 },
+    { ".X.X.X..X.X.", 0.9 },
+};
+constexpr int kRiddim12BankN = int(sizeof(kRiddim12Bank) / sizeof(kRiddim12Bank[0]));
 
 // Trap 808 skeletons (1/8 grid). Sparse-long families plus rolling and
 // glide-chain shapes; behavior (note length / gliding) is chosen per drop.
@@ -217,76 +209,108 @@ void Comp::addBass(const Section& s, Rng& r, int skipFirstBar) {
         return;
     }
 
-    // ---- Riddim: A (call) / B (response) staccato, growl "talk" wobble. ----
-    // Per-drop selections: skeleton, call/response scheme, wobble rate.
+    // ---- Riddim: syncopated 1/16 (or triplet) 2-bar CALL/RESPONSE. ----
+    // BassA = call voice (even bars), BassB = response voice (odd bars, an
+    // answered/mutated variant). Staccato stabs, growl "talk" via `mod`,
+    // per-pattern swing for the bounce, negative space around beats 1 & 3.
+    const bool triplet = r.chance(0.22 + 0.18 * plan.chaos01);
+    const Archetype* bank = triplet ? kRiddim12Bank : kRiddim16Bank;
+    const int bankN       = triplet ? kRiddim12BankN : kRiddim16BankN;
+    const int steps       = triplet ? 12 : 16;
+    const double stepBeats = BPB / double(steps); // 0.25 (1/16) or 1/3 (triplet)
+
+    // Per-pattern SWING (~55-68%): delay the off (odd) steps by a fraction of a
+    // step to get the shuffle/triplet "bounce". Small, never overlaps the grid.
+    const double swing = r.range(0.55, 0.68);
+    const double swingDelay = stepBeats * (2.0 * swing - 1.0);
+
     std::vector<double> w;
-    for (auto& a : kBassBank) w.push_back(a.weight);
+    for (int i = 0; i < bankN; ++i) w.push_back(bank[i].weight);
     int skIdx = r.pickWeighted(w, 0.4 + plan.chaos01);
-    // Call/response scheme: 0 = 2-beat swap, 1 = bar swap, 2 = AAAB phrase.
-    const int crScheme = r.pickWeighted({1.2, 1.0, 0.8}, 1.0);
-    // Wobble articulation: cycles/beat archetype 1 / 2 / 3 (weighted 40/40/20).
-    const int wIdx = r.pickWeighted({0.4, 0.4, 0.2}, 1.0);
-    const double wobCyc = (wIdx == 0) ? 1.0 : (wIdx == 1) ? 2.0 : 3.0;
+
+    std::string callPat;   // the current 2-bar phrase's CALL pattern
+    int stabCounter = 0;   // running stab index → alternating "talk" mod
 
     for (int b = 0; b < bars; ++b) {
         if (b < skipFirstBar) continue;
+        // Hard skeleton swap at the mid-drop switch (kept from before).
         if (s.switchAt8 && b == 16)
-            skIdx = (skIdx + 3) % kBassBankN; // hard skeleton swap at the switch
-        std::string pat = kBassBank[skIdx].pat;
+            skIdx = (skIdx + 3) % bankN;
 
-        // Variation: every 4 bars mutate the response half (slots 4..7).
-        if ((b % 4) == 3) {
-            for (int slot = 4; slot < 8; ++slot)
-                if (r.chance(0.35)) pat[slot] = (pat[slot] == 'X') ? '.' : 'X';
+        const bool callBar = (b % 2 == 0);
+        // Refresh the CALL pattern at the start of each 2-bar phrase.
+        if (callBar || callPat.empty()) {
+            callPat = bank[skIdx].pat;
+            // Evolve the groove every 4 bars (mutate a few steps).
+            if ((b % 4) == 0 && b > 0)
+                for (int i = 0; i < steps; ++i)
+                    if (r.chance(0.18)) callPat[i] = (callPat[i] == 'X') ? '.' : 'X';
         }
-        // Bar-8 pickup: add a lead-in eighth.
-        if ((b % 8) == 7) pat[7] = 'X';
 
-        // How many distinct pitches allowed this bar (melodic restraint).
-        int distinctCap = (plan.melody01 < 0.3f) ? 1 : 2;
+        // This bar's pattern: call = base; response = mutated answer with a
+        // resolving pickup on the last step into the next phrase.
+        std::string pat = callPat;
+        Lane lane = callBar ? Lane::BassA : Lane::BassB;
+        if (!callBar) {
+            for (int i = steps / 2; i < steps; ++i)
+                if (r.chance(0.30)) pat[i] = (pat[i] == 'X') ? '.' : 'X';
+            pat[steps - 1] = 'X'; // lead-in pickup
+        }
+        pat[0] = '.'; // keep the kick's downbeat clear — bass answers just after
+
+        // Precompute stab (step, start-time) pairs so lengths can be clamped to
+        // the actual next onset — guarantees staccato, no overlapping starts.
+        std::vector<std::pair<int, double>> stabs;
+        for (int i = 0; i < steps; ++i) {
+            if (pat[i] != 'X') continue;
+            double t = base + b * BPB + i * stepBeats + ((i % 2) ? swingDelay : 0.0);
+            stabs.emplace_back(i, t);
+        }
+
+        int distinctCap = (plan.melody01 < 0.3f) ? 1 : 2; // melodic restraint
         int distinctUsed = 0;
         int lastOff = 0;
 
-        for (int slot = 0; slot < 8; ++slot) {
-            if (pat[slot] != 'X') continue;
-            double t = mt(r, base + b * BPB + slot * 0.5);
-            // Lane by call/response scheme.
-            Lane lane;
-            switch (crScheme) {
-                case 1:  lane = (b % 2 == 0) ? Lane::BassA : Lane::BassB; break; // bar swap
-                case 2:  lane = ((b % 4) == 3) ? Lane::BassB : Lane::BassA; break; // AAAB
-                default: lane = (slot < 4) ? Lane::BassA : Lane::BassB; break;   // 2-beat swap
-            }
+        for (size_t si = 0; si < stabs.size(); ++si) {
+            double t   = stabs[si].second;
+            double nextT = (si + 1 < stabs.size()) ? stabs[si + 1].second
+                                                   : base + (b + 1) * BPB;
+            // Staccato: never overrun the next stab within this voice.
+            double maxLen = std::max(0.06, (nextT - t) * 0.9);
+            double len = std::min(r.range(0.12, 0.40), maxLen);
 
-            int off = 0; // root by default
-            if (slot != 0 && r.chance(0.15 + 0.55 * plan.complexity01)
-                && distinctUsed < distinctCap) {
-                static const int devs[] = {3, 6, 12}; // b3, b5, octave
-                off = devs[r.intRange(0, 2)];
+            // PITCH: mostly root; occasional octave jumps / dark scale moves.
+            int off = 0;
+            if (si != 0 && distinctUsed < distinctCap
+                && r.chance(0.10 + 0.45 * plan.complexity01 * plan.melody01
+                                 + 0.15 * plan.melody01)) {
+                static const int devs[]  = {12, -12, 3, 6, 10}; // 8va, -8va, b3, b5, b7
+                static const double dw[] = {1.6, 0.7, 0.9, 0.6, 0.7};
+                std::vector<double> dvw(dw, dw + 5);
+                off = devs[r.pickWeighted(dvw, 1.0)];
                 if (off != lastOff) ++distinctUsed;
             }
             lastOff = off;
             int midi = bassPitch(off);
 
-            // Staccato gate.
-            double len = r.range(0.2, 0.45);
-            // Articulation ("talk") as a wobble LFO sampled at note onset: the
-            // per-drop cycles/beat rate reshapes the growl movement audibly.
-            const double phase = (base + b * BPB + slot * 0.5) * wobCyc;
-            float wob = 0.5f + 0.5f * float(std::sin(6.283185307179586 * phase));
-            float artic = (0.32f + 0.55f * pal.aggression01) * (0.35f + 0.65f * wob);
-            if (r.chance(0.12)) artic = 0.95f; // sweep accent
-            artic = std::min(1.0f, artic);
+            // ARTICULATION ("talk"): alternate low/high per stab so consecutive
+            // stabs sound different through the growl; occasional sweep accent.
+            float artic = (stabCounter % 2 == 0) ? 0.22f : 0.60f;
+            if (r.chance(0.14)) artic = 0.95f; // sweep accent
+            artic = std::min(1.0f, artic * (0.65f + 0.6f * pal.aggression01));
+            ++stabCounter;
 
-            float vel = hvel(r, (lane == Lane::BassA) ? 0.9f : 0.82f);
+            float vel = hvel(r, callBar ? 0.90f : 0.82f);
             add(lane, t, len, midi, vel, artic);
         }
 
-        // BassC: sparse accents (only if palette has a third voice).
-        if (pal.bassVoices >= 3 && r.chance(0.35)) {
-            int slot = 2 + r.intRange(0, 4);
-            double t = mt(r, base + b * BPB + slot * 0.5);
-            add(Lane::BassC, t, 0.25, bassPitch(12), hvel(r, 0.6f), 0.5f);
+        // BassC: rare off-beat octave accent (only if a third voice exists).
+        if (pal.bassVoices >= 3 && r.chance(0.28)) {
+            int slot = triplet ? (r.chance(0.5) ? 4 : 10)
+                               : (r.chance(0.5) ? 6 : 13);
+            double t = base + b * BPB + slot * stepBeats
+                       + ((slot % 2) ? swingDelay : 0.0);
+            add(Lane::BassC, t, 0.22, bassPitch(12), hvel(r, 0.6f), 0.5f);
         }
     }
 }
@@ -445,11 +469,18 @@ void Comp::addRiddimHatBar(double bb, Rng& r, float energy, int archetype) {
         add(Lane::HatOpen, mt(r, bb + 0.5), 0.35, 46, hvel(r, 0.5f, 0.05f), 0.55f);
 }
 
-// FILL at end of an 8-bar phrase: last 2 beats of `bar`.
+// FILL at end of an 8-bar phrase: last 2 beats of `bar`. Energy-matched to the
+// section that follows so the fill ramps INTO the next section's intensity.
 void Comp::addFill(int bar, Rng& r, float nextEnergy) {
     double bb = bar * BPB;
     double fillStart = bb + 2.0; // last 2 beats
     double roll = r.uniform();
+
+    // Reverse-swell ear-candy: a short riser across the fill bar for an
+    // uplifting sweep into whatever comes next (more likely for big energy).
+    if (r.chance(0.22 + 0.30 * nextEnergy))
+        add(Lane::Riser, bb, BPB, plan.rootMidi + 34,
+            0.55f + 0.30f * nextEnergy, 0.85f);
 
     if (roll < 0.22 * (0.5 + plan.chaos01)) {
         // Cut fill: remove all drum notes in the LAST beat (silence gap).
@@ -460,33 +491,42 @@ void Comp::addFill(int bar, Rng& r, float nextEnergy) {
                 return n.startBeat >= cutFrom - 1e-6 && n.startBeat < cutTo - 1e-6;
             }), v.end());
         }
-    } else if (roll < 0.5) {
-        // Snare fill: 3..5 hits densifying, velocity ramp matched to next energy.
-        int hits = 3 + int(std::lround(nextEnergy * 2.0));
-        hits = std::min(5, std::max(3, hits));
+    } else if (roll < 0.55) {
+        // Accelerating snare roll: hit count + ramp matched to next energy, and
+        // steps bunch toward the end (accelerando) for a rising push.
+        int hits = 4 + int(std::lround(nextEnergy * 4.0)); // 4..8
+        hits = std::min(9, std::max(4, hits));
         for (int h = 0; h < hits; ++h) {
-            double t = fillStart + (2.0 * h) / hits;
-            float v = 0.6f + 0.35f * (float(h) / float(hits));
-            add(Lane::Snare, t, 0.2, 38, hvel(r, v, 0.05f));
+            double frac = double(h) / double(hits);
+            double t = fillStart + 2.0 * (frac * frac);
+            float v = 0.55f + 0.40f * frac;
+            add(Lane::Snare, t, 0.18, 38, hvel(r, v, 0.04f));
         }
     } else if (roll < 0.72) {
-        // Accelerating snare/tom roll over the whole last beat (1/8 -> 1/16).
-        double t = bb + 3.0;
-        int n = 6;
-        for (int h = 0; h < n; ++h) {
-            double step = (h < 2) ? 0.25 : 0.125;
-            add(Lane::Snare, t, 0.15, 38, hvel(r, 0.55f + 0.4f * float(h) / n, 0.04f));
-            t += step;
+        // Tom/perc flourish descending across the last 2 beats.
+        int n = 5 + int(std::lround(nextEnergy * 2.0));
+        n = std::min(7, std::max(5, n));
+        for (int h = 0; h < n; ++h)
+            add(Lane::Perc, fillStart + (2.0 * h) / n, 0.18, 37,
+                hvel(r, 0.5f + 0.3f * (float(h) / float(n)), 0.06f), 0.5f);
+    } else if (roll < 0.86) {
+        // Snare + off-beat hat combo build.
+        for (int h = 0; h < 4; ++h) {
+            add(Lane::Snare, fillStart + h * 0.5, 0.2, 38,
+                hvel(r, 0.6f + 0.06f * h, 0.05f));
+            add(Lane::HatClosed, fillStart + h * 0.5 + 0.25, 0.18, 42,
+                hvel(r, 0.5f, 0.05f), 0.3f);
         }
-    } else if (roll < 0.9) {
-        // Extra perc flourish.
-        for (int h = 0; h < 4; ++h)
-            add(Lane::Perc, fillStart + h * 0.5, 0.2, 37, hvel(r, 0.55f, 0.06f), 0.5f);
     } else {
         // Reverse-swell / riser lift into the next section.
         add(Lane::Riser, fillStart, 2.0, plan.rootMidi + 36, hvel(r, 0.7f, 0.04f), 0.8f);
         add(Lane::Perc, bb + 3.5, 0.2, 37, hvel(r, 0.5f, 0.05f), 0.5f);
     }
+
+    // Impact landing on the downbeat right after the fill, for energetic
+    // transitions (skipped for calm sections to avoid clutter).
+    if (nextEnergy > 0.6f && r.chance(0.5))
+        add(Lane::Impact, bb + BPB, 0.6, rootSub, 0.85f, 1.0f);
 }
 
 // ---------------------------------------------------------------------------
@@ -596,6 +636,13 @@ void Comp::composeBuild(const Section& s, int idx, Rng& r) {
     const double bb0 = s.startBar * BPB;
     // Riser spanning the whole build.
     add(Lane::Riser, bb0, bars * BPB, plan.rootMidi + 36, 0.85f, 0.9f);
+    // Extra short, accelerating riser over the final 1-2 bars for a stronger
+    // pre-drop lift (higher pitch + max mod = a faster, brighter sweep).
+    if (bars >= 2) {
+        int lb = std::max(0, bars - (r.chance(0.5) ? 2 : 1));
+        add(Lane::Riser, (s.startBar + lb) * BPB, (bars - lb) * BPB,
+            plan.rootMidi + 40, 0.95f, 1.0f);
+    }
 
     // Bass mostly silent; a touch early, silent last 2 bars.
     if (plan.melody01 > 0.8f) addMotif(s.startBar, bars - 2, r, false); // build arps
@@ -657,8 +704,27 @@ void Comp::composeDrop(const Section& s, int idx, Rng& r) {
 
     // FX: impact + crash at the (real) drop entry.
     double entry = (s.startBar + skip) * BPB;
+
+    // PRE-DROP SILENCE: cut the tail of the preceding build for a punchy gap so
+    // the drop lands harder (skipped for the fakeout, which has its own gap).
+    if (!fakeout && idx > 0 && plan.sections[idx - 1].type == SectionType::Build
+        && r.chance(0.7)) {
+        double gap = r.chance(0.5) ? 1.0 : 0.5;
+        double cutFrom = entry - gap, cutTo = entry;
+        for (Lane l : {Lane::Kick, Lane::Snare, Lane::HatClosed, Lane::HatOpen,
+                       Lane::Perc, Lane::Sub, Lane::BassA, Lane::BassB, Lane::BassC}) {
+            auto& v = score.notes(l);
+            v.erase(std::remove_if(v.begin(), v.end(), [&](const Note& n) {
+                return n.startBeat >= cutFrom - 1e-6 && n.startBeat < cutTo - 1e-6;
+            }), v.end());
+        }
+    }
+
     add(Lane::Impact, entry, 1.0, rootSub, 1.0f, 1.0f);
     add(Lane::Crash, entry, 2.0, 49, 0.9f, 0.5f);
+    // TRANSITION sweep: a short falling downlifter tail smoothing into the drop.
+    if (r.chance(0.5))
+        add(Lane::Downlifter, entry, 1.5, plan.rootMidi + 30, 0.7f, 0.8f);
 
     // Full bass + drums.
     addBass(s, r, skip);
@@ -669,15 +735,23 @@ void Comp::composeDrop(const Section& s, int idx, Rng& r) {
     if (plan.melody01 > 0.5f)
         addMotif(s.startBar + skip, s.bars - skip, r, false);
 
-    // Crash again just after a mid-drop switch.
-    if (s.switchAt8 && s.bars > 16)
-        add(Lane::Crash, (s.startBar + 16) * BPB, 2.0, 49, 0.85f, 0.5f);
+    // Impact + crash again at the mid-drop switch, with a lead-in riser sweep.
+    if (s.switchAt8 && s.bars > 16) {
+        double sw = (s.startBar + 16) * BPB;
+        add(Lane::Crash, sw, 2.0, 49, 0.85f, 0.5f);
+        add(Lane::Impact, sw, 0.8, rootSub, 0.9f, 1.0f);
+        if (r.chance(0.5))
+            add(Lane::Riser, sw - BPB, BPB, plan.rootMidi + 38, 0.8f, 0.9f);
+    }
 
-    // Fills at the end of every 8-bar phrase.
+    // Fills at the end of every 8-bar phrase, plus a crash marking the new
+    // phrase that follows a big fill.
     for (int b = 7; b < s.bars; b += 8) {
         float nextE = (idx + 1 < int(plan.sections.size()))
                           ? plan.sections[idx + 1].energy : 0.5f;
         addFill(s.startBar + b, r, nextE);
+        if (b + 1 < s.bars && r.chance(0.6))
+            add(Lane::Crash, (s.startBar + b + 1) * BPB, 1.5, 49, 0.8f, 0.5f);
     }
 }
 

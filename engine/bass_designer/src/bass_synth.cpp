@@ -5,6 +5,7 @@
 #include <cstdio>
 #include "../../sound_design/src/dsp.h"
 #include "../../sound_design/src/voices.h"
+#include "rtg/decision/calibration.h"   // reference-growl fingerprint (JOB 1)
 
 namespace rtg::synth {
 using namespace dsp;
@@ -37,11 +38,23 @@ Recipe makeGrowlRecipe(float aggr, float dark, float nov, Rng& rng) {
     p["fmIndex"]      = 2.0f + aggr * 8.0f + rng.rangef(-1.0f, 1.0f) * (1.0f + nov * 2.5f);
     p["fmDecay"]      = rng.rangef(0.05f, 0.16f);
     p["fmFeedback"]   = rng.rangef(0.0f, 0.5f) * (0.5f + aggr);
-    p["carMix"]       = rng.rangef(0.35f, 0.65f);   // FM vs analog blend
-    p["srcMorph"]     = rng.rangef(0.0f, 1.0f);     // saw->square->pulse
+    p["carMix"]       = rng.rangef(0.15f, 0.4f);    // analog square leads over FM sine
+    p["srcMorph"]     = rng.rangef(0.35f, 0.6f);    // bias to square-center of saw->square->pulse
     p["pulseWidth"]   = rng.rangef(0.2f, 0.5f);
+    p["pmAmt"]        = rng.rangef(0.08f, 0.45f) * (0.6f + aggr); // FM the square carrier -> metal
+    p["pwmRate"]      = rng.rangef(0.15f, 0.8f);    // slow pulse-width movement
+    p["pwmDepth"]     = rng.rangef(0.05f, 0.2f);
     p["unison"]       = float(rng.intRange(1, 3));
     p["detuneCents"]  = rng.rangef(6.0f, 20.0f);
+    // --- bitcrush / sample-rate-reduction grit (robotic "talk") ---
+    p["gritRate"]     = rng.rangef(3000.0f, 14000.0f);
+    p["gritBits"]     = rng.rangef(6.0f, 12.0f);
+    p["gritMix"]      = clampf(rng.rangef(0.25f, 0.7f) * (0.5f + aggr), 0.0f, 1.0f);
+    // --- tempo-synced amplitude gate (the "wub") ---
+    static const float gateDivs[] = {2.0f, 3.0f, 4.0f, 6.0f}; // 8ths / 8th-trips / 16ths / sextuplets
+    p["gateDiv"]      = gateDivs[rng.intRange(0, 3)];
+    p["gateDepth"]    = rng.rangef(0.45f, 0.85f);
+    p["gateShape"]    = (rng.uniform() < 0.5) ? 4.0f : 5.0f;   // 4 square, 5 stepped S&H
     // --- distortion staging ---
     p["drivePre"]     = 1.6f + aggr * 2.6f + rng.rangef(-0.2f, 0.5f);
     p["mudDb"]        = -(2.0f + rng.rangef(0.0f, 4.0f));   // ~300 Hz dip
@@ -76,6 +89,51 @@ Recipe makeGrowlRecipe(float aggr, float dark, float nov, Rng& rng) {
     p["ampAtk"]       = rng.rangef(0.004f, 0.016f);
     p["ampRel"]       = rng.rangef(0.008f, 0.022f);
     p["gain"]         = 0.6f;
+    // --- wavefolder ("tearout" bark): 2x-oversampled, blend-controlled, low ---
+    p["foldDrive"]    = rng.rangef(1.2f, 2.4f);       // pre-fold gain (1..3)
+    p["foldMix"]      = rng.rangef(0.05f, 0.28f);     // conservative wet blend
+    p["foldPre"]      = (rng.uniform() < 0.5) ? 1.0f : 0.0f; // pre/post-formant
+    // --- swept comb-notch ("watery" moving notches): feed-forward, low mix ---
+    p["combMix"]      = rng.rangef(0.04f, 0.22f);     // conservative wet blend
+    p["combG"]        = rng.rangef(0.3f, 0.7f);       // feed-forward gain (<0.9)
+    p["combFb"]       = rng.rangef(0.0f, 0.3f);       // light feedback (<0.9)
+    p["combRateHz"]   = rng.rangef(0.1f, 1.0f);       // slow LFO sweep rate
+    p["combBaseMs"]   = rng.rangef(1.5f, 7.0f);       // base delay (1..8 ms)
+
+    // ================= reference-growl match (calibration fingerprint) =========
+    // Applied AFTER every rng draw above, so the rng sequence (and determinism)
+    // is identical whether or not a calibration is active. All nudges below are
+    // pure post-hoc arithmetic on already-drawn params — no new randomness.
+    if (const auto& cal = rtg::Calibration::active(); cal.has_value()) {
+        const CalibrationProfile& fp = cal->forGenre(rtg::Genre::Riddim);
+        if (fp.present) {
+            // SQUARE-NESS: a very odd-harmonic reference => push the morph toward
+            // the square center and lean on the analog square over the FM sine.
+            if (fp.growlOdd > 0.60f) {
+                float t = clampf((fp.growlOdd - 0.60f) / 0.30f, 0.0f, 1.0f);
+                p["srcMorph"] = clampf(lerpf(p["srcMorph"], 0.5f,  t), 0.3f, 0.7f);
+                p["carMix"]   = clampf(lerpf(p["carMix"],   0.12f, t), 0.1f, 0.5f);
+            }
+            // BRIGHTNESS: map the growl-band centroid (~1900 Hz neutral for a
+            // real growl) to a gentle nudge of the body filter + high shelf.
+            float bright = clampf((fp.growlCentroidHz - 1900.0f) / 1800.0f, -1.0f, 1.0f);
+            p["lpMul"]       = clampf(p["lpMul"]       + bright * 1.5f, 2.0f, 8.0f);
+            p["highShelfDb"] = clampf(p["highShelfDb"] + bright * 3.0f, -6.0f, 4.0f);
+            // WOBBLE: snap the gate division to the reference wobble rate (145 BPM
+            // quarter = 2.42 Hz) and make the wub pronounced.
+            if (fp.growlWobbleHz > 0.5f) {
+                float xq = fp.growlWobbleHz / 2.42f;
+                static const float divs[] = {2.0f, 3.0f, 4.0f, 6.0f};
+                float best = divs[0], bestErr = std::fabs(xq - divs[0]);
+                for (float d : divs) {
+                    float e = std::fabs(xq - d);
+                    if (e < bestErr) { bestErr = e; best = d; }
+                }
+                p["gateDiv"]   = best;
+                p["gateDepth"] = clampf(lerpf(p["gateDepth"], 0.85f, 0.5f), 0.45f, 0.85f);
+            }
+        }
+    }
     return r;
 }
 
@@ -92,6 +150,15 @@ StereoBuffer renderGrowl(const Recipe& rc, const Voice& v) {
     const float carMix       = clampf(rc.get("carMix", 0.5f), 0.0f, 1.0f);
     const float srcMorph     = clampf(rc.get("srcMorph", 0.5f), 0.0f, 1.0f);
     const double pulseWidth  = clampd(rc.get("pulseWidth", 0.35f), 0.1, 0.9);
+    const float pmAmt        = clampf(rc.get("pmAmt", 0.22f), 0.0f, 1.5f);  // FM->square depth
+    const float pwmRate      = std::max(0.0f, rc.get("pwmRate", 0.35f));
+    const float pwmDepth     = clampf(rc.get("pwmDepth", 0.12f), 0.0f, 0.4f);
+    const double gritRate    = clampd(rc.get("gritRate", 8000.0f), 1000.0, sr * 0.5);
+    const float gritBits     = clampf(rc.get("gritBits", 9.0f), 2.0f, 16.0f);
+    const float gritMix      = clampf(rc.get("gritMix", 0.4f), 0.0f, 1.0f);
+    const float gateDivF     = clampf(rc.get("gateDiv", 4.0f), 1.0f, 16.0f);
+    const float gateDepth    = clampf(rc.get("gateDepth", 0.6f), 0.0f, 0.95f);
+    const int   gateShape    = std::clamp(int(rc.get("gateShape", 4.0f)), 4, 5);
     const int   unison       = std::clamp(int(rc.get("unison", 1.0f)), 1, 3);
     const float detuneCents  = rc.get("detuneCents", 12.0f);
     const float drivePre     = rc.get("drivePre", 2.5f);
@@ -106,7 +173,7 @@ StereoBuffer renderGrowl(const Recipe& rc, const Voice& v) {
     const float formantGain  = rc.get("formantGain", 2.6f);
     const float morphBase    = clampf(rc.get("morphBase", 0.2f), 0.0f, 1.0f);
     const float morphMod     = clampf(rc.get("morphMod", 0.6f), 0.0f, 1.0f);
-    const float lfoRate      = rc.get("lfoRate", 4.0f);
+    const float lfoRate      = std::max(0.02f, rc.get("lfoRate", 4.0f));  // never negative (mutation-safe)
     const float lfoDepth     = clampf(rc.get("lfoDepth", 0.45f), 0.0f, 1.0f);
     const int   lfoShape     = std::clamp(int(rc.get("lfoShape", 0.0f)), 0, 5);
     const int   lfoSteps     = std::clamp(int(rc.get("lfoSteps", 4.0f)), 1, 16);
@@ -117,12 +184,22 @@ StereoBuffer renderGrowl(const Recipe& rc, const Voice& v) {
     const float midFreq      = rc.get("midFreq", 1400.0f);
     const float highShelfDb  = rc.get("highShelfDb", 0.0f);
     const float ottAmt       = clampf(rc.get("ottAmt", 0.28f), 0.0f, 1.0f);
-    const float phaserRate   = rc.get("phaserRate", 0.6f);
+    const float phaserRate   = std::max(0.02f, rc.get("phaserRate", 0.6f));
     const float phaserMix    = clampf(rc.get("phaserMix", 0.3f), 0.0f, 1.0f);
     const float width        = clampf(rc.get("width", 0.12f), 0.0f, 0.6f);
     const float ampAtk       = rc.get("ampAtk", 0.008f);
     const float ampRel       = rc.get("ampRel", 0.012f);
     const float gain         = rc.get("gain", 0.6f);
+    // Wavefolder (defaults keep the stage OFF so legacy recipes are unchanged).
+    const float foldDrive    = clampf(rc.get("foldDrive", 1.6f), 1.0f, 4.0f);
+    const float foldMix      = clampf(rc.get("foldMix", 0.0f), 0.0f, 0.5f);
+    const bool  foldPre      = rc.get("foldPre", 0.0f) > 0.5f;
+    // Swept comb-notch (defaults keep the stage OFF for legacy recipes).
+    const float combMix      = clampf(rc.get("combMix", 0.0f), 0.0f, 0.4f);
+    const float combG        = clampf(rc.get("combG", 0.5f), 0.0f, 0.85f);
+    const float combFb       = clampf(rc.get("combFb", 0.0f), 0.0f, 0.7f);
+    const float combRateHz   = clampf(rc.get("combRateHz", 0.3f), 0.01f, 4.0f);
+    const float combBaseMs   = clampf(rc.get("combBaseMs", 4.0f), 0.5f, 12.0f);
     const float mod          = clampf(v.mod, 0.0f, 1.0f);
 
     const int vpath[3] = {vowel0, vowel1, vowel2};
@@ -155,8 +232,33 @@ StereoBuffer renderGrowl(const Recipe& rc, const Voice& v) {
     DCBlock dc;
     ShapeLFO lfo; lfo.init(lfoRate, sr, lfoShape, lfoSteps, nrng.next());
     LFO phaser; phaser.setRate(phaserRate, sr);
+    LFO pwm; pwm.setRate(pwmRate, sr);            // slow pulse-width movement
     EnvADSR amp; amp.start(ampAtk, 0.06f, 0.85f, ampRel, sr);
     EnvAD idxEnv; idxEnv.start(0.001f, fmDecay, sr);
+
+    // Tempo-synced amplitude gate ("wub"): active only when the caller supplies a
+    // beat rate (v.syncHz). Square/stepped shape -> unipolar amp multiplier, declicked.
+    const uint64_t gateSeed = nrng.next();       // consumed unconditionally for determinism
+    const bool gateOn = v.syncHz > 0.0;
+    ShapeLFO gateLfo;
+    if (gateOn) gateLfo.init(clampd(v.syncHz * double(gateDivF), 0.1, 200.0),
+                             sr, gateShape, 8, gateSeed);
+    OnePole gateSmooth; gateSmooth.setTime(0.003f, sr); gateSmooth.reset(1.0f);
+
+    // New tone stages. FoldOS2 has no random state. The comb LFO phase is seeded
+    // from nrng AFTER gateSeed so the existing draw order (and legacy sound) is
+    // unchanged; combLfo is the only new nrng consumer.
+    FoldOS2 folder;
+    DCBlock foldDc;                              // fold adds even harmonics/DC
+    DelayLine comb;
+    const int combMax = int(std::ceil(double(combBaseMs) * 2.0 * 0.001 * sr)) + 4;
+    comb.setSize(std::max(combMax, 8));
+    LFO combLfo; combLfo.setRate(combRateHz, sr); combLfo.reset(nrng.uniform());
+
+    // Bitcrush / sample-rate-reduction grit state (phase-accumulator S&H).
+    double gritPhase = 1.0;   // >=1 so the first sample latches a fresh value
+    float  gritHold = 0.0f;
+    const float gritLevels = std::pow(2.0f, gritBits - 1.0f);
 
     const double baseCut = freq * lpMul;
     const size_t gateN = size_t(std::llround(v.gateSec * sr));
@@ -168,7 +270,11 @@ StereoBuffer renderGrowl(const Recipe& rc, const Voice& v) {
         const float ie = idxEnv.tick();
         const float idx = fmIndex * (0.35f + 0.65f * ie);
 
-        // --- rich source ---
+        // slow PWM movement on the pulse width (band-limited pulse).
+        double pw = clampd(pulseWidth + double(pwmDepth) * double(pwm.tick()), 0.05, 0.95);
+
+        // --- square-dominant source: read the analog osc at a phase-modulated
+        //     phase (FM from the sine modulator B into the square carrier). ---
         double sig = 0.0;
         for (int i = 0; i < unison; ++i) {
             double mfreq = freq * detFactor[i] * carrierRatio;
@@ -176,13 +282,16 @@ StereoBuffer renderGrowl(const Recipe& rc, const Voice& v) {
             double m = std::sin(kTwoPi * modPh[i] + double(fbState[i]) * fmFeedback) * idx;
             double c = std::sin(kTwoPi * carPh[i] + m);
             fbState[i] = float(c);
-            // morphable analog osc (saw -> square -> pulse) from shared phase.
-            double ph = osc[i].phase, inc = osc[i].inc;
-            double saw = 2.0 * ph - 1.0 - polyBlep(ph, inc);
-            double t2 = ph + 0.5; if (t2 >= 1.0) t2 -= 1.0;
-            double sqr = (ph < 0.5 ? 1.0 : -1.0) + polyBlep(ph, inc) - polyBlep(t2, inc);
-            double t3 = ph + (1.0 - pulseWidth); if (t3 >= 1.0) t3 -= 1.0;
-            double pul = (ph < pulseWidth ? 1.0 : -1.0) + polyBlep(ph, inc) - polyBlep(t3, inc);
+            // morphable analog osc (saw -> square -> pulse); FM applied as a phase
+            // offset in cycles, wrapped to [0,1). Same `inc` -> approximate band-limit.
+            double inc = osc[i].inc;
+            double phm = osc[i].phase + double(pmAmt) * m;   // FM into the square
+            phm -= std::floor(phm);                          // wrap to [0,1)
+            double saw = 2.0 * phm - 1.0 - polyBlep(phm, inc);
+            double t2 = phm + 0.5; if (t2 >= 1.0) t2 -= 1.0;
+            double sqr = (phm < 0.5 ? 1.0 : -1.0) + polyBlep(phm, inc) - polyBlep(t2, inc);
+            double t3 = phm + (1.0 - pw); if (t3 >= 1.0) t3 -= 1.0;
+            double pul = (phm < pw ? 1.0 : -1.0) + polyBlep(phm, inc) - polyBlep(t3, inc);
             osc[i].advance();
             double analog = (srcMorph < 0.5) ? (saw + (sqr - saw) * (srcMorph * 2.0))
                                              : (sqr + (pul - sqr) * ((srcMorph - 0.5) * 2.0));
@@ -195,6 +304,13 @@ StereoBuffer renderGrowl(const Recipe& rc, const Voice& v) {
         // --- pre-drive then mud cut ---
         float pre = std::tanh(float(sig) * drivePre);
         pre = mud.process(pre);
+
+        // --- wavefolder (PRE-formant placement, seed flag) ---
+        // 2x-oversampled fold blended low; DC-blocked (fold makes even harmonics).
+        if (foldPre && foldMix > 0.0f) {
+            float folded = foldDc.tick(folder.process(pre, foldDrive));
+            pre = lerpf(pre, folded, foldMix);
+        }
 
         // --- vowel morph driven by note.mod + rhythmic LFO ("talk") ---
         if ((coefCtr & 7) == 0) {
@@ -218,6 +334,40 @@ StereoBuffer renderGrowl(const Recipe& rc, const Voice& v) {
         float pf = shFold(filtered * drivePost);
         float post = lerpf(pt, pf, wsMix);
 
+        // --- wavefolder (POST-formant placement, seed flag) ---
+        if (!foldPre && foldMix > 0.0f) {
+            float folded = foldDc.tick(folder.process(post, foldDrive));
+            post = lerpf(post, folded, foldMix);
+        }
+
+        // --- bitcrush / sample-rate reduction grit (robotic "talk") ---
+        // Rhythmic LFO nudges the hold rate so grit interacts with the gate.
+        // NOT oversampled: the aliasing IS the effect. post is bounded [-1,1] here.
+        if (gritMix > 0.0f) {
+            double gRate = clampd(gritRate * (1.0 + 0.5 * double(lval)), 1000.0, sr * 0.5);
+            gritPhase += gRate / sr;
+            if (gritPhase >= 1.0) {
+                gritPhase -= std::floor(gritPhase);
+                float q = std::round(post * gritLevels) / gritLevels; // bit reduction
+                gritHold = q;
+            }
+            post = lerpf(post, gritHold, gritMix);
+        }
+
+        // --- swept comb-notch ("watery" moving notches) ---
+        // Feed-forward comb y = (x + g*x[n-L]) / (1+g) with a fractional delay L
+        // swept by a slow LFO; the /(1+g) normalization keeps unity gain so this
+        // only sculpts notches, never boosts level. Light feedback for resonance.
+        if (combMix > 0.0f) {
+            float lv = combLfo.tick();                       // [-1,1]
+            float ms = combBaseMs * (1.0f + 0.5f * lv);      // sweep +/-50%
+            double L = clampd(double(ms) * 0.001 * sr, 1.0, double(comb.buf.size()) - 2.0);
+            float d = comb.readFrac(L);
+            float y = (post + combG * d) / (1.0f + combG);
+            comb.write(post + combFb * d);
+            post = lerpf(post, y, combMix);
+        }
+
         // --- subtle phaser movement ---
         float pv = phaser.tick();
         float apf = 700.0f * std::pow(2.0f, 0.9f * pv);
@@ -231,7 +381,18 @@ StereoBuffer renderGrowl(const Recipe& rc, const Voice& v) {
         h = midPk.process(h);
         h = hsh.process(h);
         h = ott.process(h) * 0.5f;
-        float mono = dc.tick(h) * amp.tick(gate) * v.velocity * gain;
+
+        // --- tempo-synced amplitude gate (the "wub") ---
+        // Unipolar multiplier in [1-depth, 1], declicked by a ~3 ms one-pole. Only
+        // reduces level (never louder). Free-running when v.syncHz == 0.
+        float gmul = 1.0f;
+        if (gateOn) {
+            float g = gateLfo.tick();                       // bipolar [-1,1]
+            float uni = 0.5f * (g + 1.0f);                  // [0,1]
+            float target = (1.0f - gateDepth) + gateDepth * uni; // [1-depth, 1]
+            gmul = gateSmooth.tick(target);
+        }
+        float mono = dc.tick(h) * amp.tick(gate) * v.velocity * gain * gmul;
 
         float rC = apR.process(mono);
         float l = mono;
@@ -295,11 +456,11 @@ StereoBuffer renderScreech(const Recipe& rc, const Voice& v) {
     const float formantGain = rc.get("formantGain", 2.5f);
     const float morphBase = clampf(rc.get("morphBase", 0.2f), 0.0f, 1.0f);
     const float morphMod = clampf(rc.get("morphMod", 0.6f), 0.0f, 1.0f);
-    const float lfoRate = rc.get("lfoRate", 4.0f);
+    const float lfoRate = std::max(0.02f, rc.get("lfoRate", 4.0f));  // never negative (mutation-safe)
     const float lfoDepth = clampf(rc.get("lfoDepth", 0.5f), 0.0f, 1.0f);
     const int   lfoShape = std::clamp(int(rc.get("lfoShape", 0.0f)), 0, 5);
     const int   lfoSteps = std::clamp(int(rc.get("lfoSteps", 4.0f)), 1, 16);
-    const float phaserRate = rc.get("phaserRate", 1.5f);
+    const float phaserRate = std::max(0.02f, rc.get("phaserRate", 1.5f));
     const float phaserDepth = clampf(rc.get("phaserDepth", 0.6f), 0.0f, 1.0f);
     const float phaserCenter = rc.get("phaserCenter", 2000.0f);
     const float combFb = clampf(rc.get("combFb", 0.5f), 0.0f, 0.85f);

@@ -136,6 +136,7 @@ StereoBuffer renderPreview(const Recipe& recipe, int rootMidi, double seconds,
     v.mod = (recipe.role == Role::HatClosed || recipe.role == Role::HatOpen) ? 0.5f : 0.3f;
     v.bendSemis = 0.0f;
     v.seed = recipe.seed ? recipe.seed : 1;
+    v.syncHz = 140.0 / 60.0;              // audition the wub at a musical ~140 BPM
 
     StereoBuffer buf = renderRole(recipe.role, recipe, v);
 
@@ -182,6 +183,7 @@ StereoBuffer renderLane(Lane /*lane*/, const std::vector<Note>& notes,
         v.mod = note.mod;
         v.bendSemis = note.bendSemis;
         v.seed = noteSeed(recipe.seed, note, myIdx);
+        v.syncHz = plan.bpm / 60.0;       // quarter-note in Hz for the riddim gate
 
         StereoBuffer tmp = renderRole(role, recipe, v);
         out.addFrom(tmp, off);

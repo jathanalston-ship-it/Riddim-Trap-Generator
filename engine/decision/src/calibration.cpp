@@ -10,6 +10,7 @@
 #include <numeric>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace rtg {
@@ -85,8 +86,17 @@ BlockGrid makeGrid(const std::vector<float>& mono, double sr) {
     }
     std::vector<size_t> order(g.starts.size());
     std::iota(order.begin(), order.end(), size_t(0));
-    std::sort(order.begin(), order.end(),
-              [&](size_t a, size_t b) { return energy[a] > energy[b]; });
+    // NaN-safe descending sort (strict weak ordering; NaN energies sort last).
+    // A raw `energy[a] > energy[b]` comparator is UB if any energy is NaN
+    // (introsort walks past the array end -> crash); callers should feed finite
+    // audio, but harden here too since this is the flagged crash site.
+    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+        double ea = energy[a], eb = energy[b];
+        bool na = std::isnan(ea), nb = std::isnan(eb);
+        if (na) return false;      // a is NaN -> never before b
+        if (nb) return true;       // b is NaN -> a before b
+        return ea > eb;
+    });
     size_t take = std::max<size_t>(1, order.size() / 4);
     g.loudTop25.assign(order.begin(), order.begin() + take);
     return g;
@@ -241,6 +251,161 @@ float measureStereoWidth(const StereoBuffer& audio) {
     return float(std::sqrt(side / mid));
 }
 
+// ---------------------------------------------------------------------------
+// measureGrowlFingerprint : odd-harmonic fraction, wobble rate, brightness
+// centroid of the growl bass over the single loudest ~4 s window. Hand-rolled
+// DSP only (autocorrelation + Goertzel + biquad filterbank); no FFT, no JUCE.
+// All math in double; every divide guarded; degenerate input -> struct defaults.
+// ---------------------------------------------------------------------------
+GrowlFingerprint measureGrowlFingerprint(const StereoBuffer& audio, double sr) {
+    GrowlFingerprint fp;                         // defaults returned on any bail-out
+    if (sr <= 0.0) return fp;
+    std::vector<float> mono = monoSum(audio);
+    if (mono.size() < size_t(sr * 0.5)) return fp;   // < 0.5 s -> defaults
+
+    // --- 2. pick the single loudest ~4 s growl window --------------------
+    const size_t winLen = std::min(mono.size(), std::max<size_t>(1, size_t(4.0 * sr)));
+    std::vector<float> growlFull = bandLimit(mono, sr, 120.0, 3000.0);
+    size_t bestStart = 0;
+    if (mono.size() > winLen) {
+        const size_t hop = std::max<size_t>(1, size_t(0.5 * sr));
+        double bestE = -1.0;
+        for (size_t s = 0; s + winLen <= mono.size(); s += hop) {
+            double e = 0.0;
+            for (size_t i = 0; i < winLen; ++i) { double v = growlFull[s + i]; e += v * v; }
+            if (e > bestE) { bestE = e; bestStart = s; }
+        }
+    }
+    std::vector<float> seg(mono.begin() + bestStart, mono.begin() + bestStart + winLen);
+
+    // Peak-of-autocorrelation helper: best lag in [loLag,hiLag] and its
+    // zero-lag-normalized strength. Assumes x is already demeaned.
+    auto autocorrPeak = [](const std::vector<double>& x, size_t loLag, size_t hiLag)
+        -> std::pair<size_t, double> {
+        const size_t N = x.size();
+        if (N < 2) return {0, 0.0};
+        if (hiLag >= N) hiLag = N - 1;
+        if (loLag < 1) loLag = 1;
+        if (loLag > hiLag) return {0, 0.0};
+        double r0 = 0.0; for (double v : x) r0 += v * v;
+        if (r0 <= 1e-20) return {0, 0.0};
+        double best = -1e300; size_t bestLag = 0;
+        for (size_t lag = loLag; lag <= hiLag; ++lag) {
+            double acc = 0.0;
+            const size_t lim = N - lag;
+            for (size_t i = 0; i < lim; ++i) acc += x[i] * x[i + lag];
+            if (acc > best) { best = acc; bestLag = lag; }
+        }
+        return {bestLag, best / r0};
+    };
+
+    // --- 3. fundamental f0 via autocorrelation of the 25..200 Hz band ----
+    std::vector<float> lowb = bandLimit(seg, sr, 25.0, 200.0);
+    std::vector<double> low(lowb.size());
+    {
+        double mean = 0.0; for (float v : lowb) mean += v;
+        mean /= double(std::max<size_t>(1, lowb.size()));
+        for (size_t i = 0; i < lowb.size(); ++i) low[i] = double(lowb[i]) - mean;
+    }
+    double f0 = 60.0;
+    {
+        size_t loLag = size_t(sr / 200.0);   // highest freq -> smallest lag
+        size_t hiLag = size_t(sr / 25.0);    // lowest  freq -> largest lag
+        const size_t Nx = low.size();
+        if (hiLag >= Nx && Nx > 0) hiLag = Nx - 1;
+        double r0 = 0.0; for (double v : low) r0 += v * v;
+        if (r0 > 1e-20 && loLag >= 1 && loLag <= hiLag) {
+            std::vector<double> ac(hiLag + 1, 0.0);
+            double best = -1e300;
+            for (size_t lag = loLag; lag <= hiLag; ++lag) {
+                double acc = 0.0; const size_t lim = Nx - lag;
+                for (size_t i = 0; i < lim; ++i) acc += low[i] * low[i + lag];
+                ac[lag] = acc; if (acc > best) best = acc;
+            }
+            // Octave-safe: pick the LOWEST-frequency (largest lag) peak that is
+            // still within 85% of the strongest, so we lock onto the true
+            // fundamental instead of a stronger 2nd/3rd harmonic.
+            size_t chosen = 0;
+            for (size_t lag = hiLag; lag >= loLag; --lag) {
+                if (ac[lag] >= 0.85 * best) { chosen = lag; break; }
+                if (lag == loLag) break;
+            }
+            if (chosen > 0) f0 = sr / double(chosen);
+        }
+    }
+    f0 = std::min(120.0, std::max(25.0, f0));    // clamp to the growl fundamental range
+
+    // --- 4. odd/even harmonic energy (square-ness) via Goertzel ----------
+    auto goertzel = [&](const std::vector<float>& x, double f) -> double {
+        double w = 2.0 * kPi * f / sr;
+        double coeff = 2.0 * std::cos(w);
+        double s1 = 0.0, s2 = 0.0;
+        for (float v : x) { double s0 = double(v) + coeff * s1 - s2; s2 = s1; s1 = s0; }
+        double p = s1 * s1 + s2 * s2 - coeff * s1 * s2;   // single-bin power
+        return p > 0.0 ? p : 0.0;
+    };
+    {
+        double oddE = 0.0, evenE = 0.0;
+        const double fmax = std::min(6000.0, sr * 0.45);
+        for (int h = 1; h <= 24; ++h) {
+            double fh = f0 * double(h);
+            if (fh >= fmax) break;
+            double p = goertzel(seg, fh);
+            if (h & 1) oddE += p; else evenE += p;
+        }
+        double tot = oddE + evenE;
+        if (tot > 1e-20) fp.odd = float(std::min(1.0, std::max(0.0, oddE / tot)));
+    }
+
+    // --- 5. brightness centroid over a log filterbank 250..8000 Hz -------
+    // Amplitude- (not energy-) weighted and started ABOVE the fundamental, so
+    // it reflects how much upper-harmonic content the growl carries (a
+    // "brightness" cue for the filter/shelf), rather than being pinned to the
+    // dominant low fundamental of a bass sound.
+    {
+        const int nb = 12;
+        const double flo = 250.0, fhi = std::min(8000.0, sr * 0.45);
+        double num = 0.0, den = 0.0, prevEdge = flo;
+        for (int b = 0; b < nb; ++b) {
+            double hi = flo * std::pow(fhi / flo, double(b + 1) / double(nb));
+            double lo = prevEdge; prevEdge = hi;
+            std::vector<float> bb = bandLimit(seg, sr, lo, hi);
+            double e = 0.0; for (float v : bb) e += double(v) * v;
+            double amp = std::sqrt(e);           // amplitude weighting
+            double fc = std::sqrt(lo * hi);      // geometric band center
+            num += fc * amp; den += amp;
+        }
+        if (den > 1e-20) fp.centroidHz = float(std::min(8000.0, std::max(150.0, num / den)));
+    }
+
+    // --- 6. wobble/gate rate from the growl-BODY amplitude envelope ------
+    // Use a 250..2500 Hz band (above the kick/sub) so the envelope tracks the
+    // growl's rhythmic gating, and search 2.5..14 Hz — the riddim wobble range
+    // (1/8..1/16 notes at ~140-150 BPM) — so we don't lock onto the slower
+    // kick/snare phrase pulse (~1-2 Hz).
+    {
+        std::vector<float> gseg = bandLimit(seg, sr, 250.0, 2500.0);
+        Biquad lp = makeLP(sr, 30.0);            // ~30 Hz envelope follower
+        std::vector<double> envF(gseg.size());
+        for (size_t i = 0; i < gseg.size(); ++i) envF[i] = lp.process(std::fabs(gseg[i]));
+        // Decimate to ~500 Hz so the wobble autocorrelation stays O(n).
+        size_t dec = std::max<size_t>(1, size_t(sr / 500.0));
+        double envSr = sr / double(dec);
+        std::vector<double> env;
+        env.reserve(envF.size() / dec + 1);
+        for (size_t i = 0; i < envF.size(); i += dec) env.push_back(envF[i]);
+        double mean = 0.0; for (double v : env) mean += v;
+        mean /= double(std::max<size_t>(1, env.size()));
+        for (double& v : env) v -= mean;
+        size_t loLag = std::max<size_t>(1, size_t(envSr / 14.0));  // up to 14 Hz
+        size_t hiLag = size_t(envSr / 2.5);                        // down to 2.5 Hz
+        auto pk = autocorrPeak(env, loLag, hiLag);
+        if (pk.first > 0 && pk.second > 0.12)    // require a clear periodic peak
+            fp.wobbleHz = float(std::min(20.0, std::max(0.0, envSr / double(pk.first))));
+    }
+    return fp;
+}
+
 // ===========================================================================
 // Shared analyzer aggregation (used by the CLI --analyze-refs and the GUI)
 // ===========================================================================
@@ -264,6 +429,9 @@ CalibrationProfile meanProfile(const CalibrationProfile& a, const CalibrationPro
     o.dropBreakContrastLu = avg(a.dropBreakContrastLu, b.dropBreakContrastLu);
     o.spectralTiltDbPerOct = avg(a.spectralTiltDbPerOct, b.spectralTiltDbPerOct);
     o.stereoWidth = avg(a.stereoWidth, b.stereoWidth);
+    o.growlOdd = avg(a.growlOdd, b.growlOdd);
+    o.growlWobbleHz = avg(a.growlWobbleHz, b.growlWobbleHz);
+    o.growlCentroidHz = avg(a.growlCentroidHz, b.growlCentroidHz);
     o.refCount = a.refCount + b.refCount;
     return o;
 }
@@ -278,6 +446,10 @@ RefMeasurement Calibration::measureReference(const StereoBuffer& audio48k, doubl
     m.contrastLu = measureContrastLu(audio48k, sampleRate);
     m.tiltDbPerOct = measureSpectralTiltDbPerOct(audio48k, sampleRate);
     m.width = measureStereoWidth(audio48k);
+    GrowlFingerprint gf = measureGrowlFingerprint(audio48k, sampleRate);
+    m.growlOdd = gf.odd;
+    m.growlWobbleHz = gf.wobbleHz;
+    m.growlCentroidHz = gf.centroidHz;
     return m;
 }
 
@@ -285,7 +457,7 @@ CalibrationProfile Calibration::aggregate(const std::vector<RefMeasurement>& mea
     CalibrationProfile prof;
     if (measurements.empty()) { prof.present = false; return prof; }
 
-    std::vector<float> vLufs, vCrest, vContrast, vTilt, vWidth;
+    std::vector<float> vLufs, vCrest, vContrast, vTilt, vWidth, vGOdd, vGWob, vGCen;
     std::array<std::vector<float>, kCalBands> vBands;
     for (const auto& r : measurements) {
         vLufs.push_back(r.lufs);
@@ -293,6 +465,9 @@ CalibrationProfile Calibration::aggregate(const std::vector<RefMeasurement>& mea
         vContrast.push_back(r.contrastLu);
         vTilt.push_back(r.tiltDbPerOct);
         vWidth.push_back(r.width);
+        vGOdd.push_back(r.growlOdd);
+        vGWob.push_back(r.growlWobbleHz);
+        vGCen.push_back(r.growlCentroidHz);
         for (int b = 0; b < kCalBands; ++b) vBands[b].push_back(r.bands[b]);
     }
 
@@ -303,6 +478,9 @@ CalibrationProfile Calibration::aggregate(const std::vector<RefMeasurement>& mea
     prof.dropBreakContrastLu = medianOf(vContrast);
     prof.spectralTiltDbPerOct = medianOf(vTilt);
     prof.stereoWidth = medianOf(vWidth);
+    prof.growlOdd = medianOf(vGOdd);
+    prof.growlWobbleHz = medianOf(vGWob);
+    prof.growlCentroidHz = medianOf(vGCen);
     float s = 0.0f;
     for (int b = 0; b < kCalBands; ++b) { prof.bands[b] = medianOf(vBands[b]); s += prof.bands[b]; }
     if (s > 1e-6f) for (int b = 0; b < kCalBands; ++b) prof.bands[b] /= s;   // re-normalize
@@ -341,6 +519,9 @@ void writeProfile(std::ostream& os, const char* prefix, const CalibrationProfile
     kv("dropBreakContrastLu", p.dropBreakContrastLu);
     kv("spectralTiltDbPerOct", p.spectralTiltDbPerOct);
     kv("stereoWidth", p.stereoWidth);
+    kv("growlOdd", p.growlOdd);
+    kv("growlWobbleHz", p.growlWobbleHz);
+    kv("growlCentroidHz", p.growlCentroidHz);
     kv("refCount", p.refCount);
 }
 
@@ -387,6 +568,9 @@ void readProfile(const std::map<std::string, double>& m, const char* prefix, Cal
     p.dropBreakContrastLu = get("dropBreakContrastLu", p.dropBreakContrastLu);
     p.spectralTiltDbPerOct = get("spectralTiltDbPerOct", p.spectralTiltDbPerOct);
     p.stereoWidth = get("stereoWidth", p.stereoWidth);
+    p.growlOdd = get("growlOdd", p.growlOdd);
+    p.growlWobbleHz = get("growlWobbleHz", p.growlWobbleHz);
+    p.growlCentroidHz = get("growlCentroidHz", p.growlCentroidHz);
     p.refCount = int(std::lround(get("refCount", float(p.refCount))));
 }
 
