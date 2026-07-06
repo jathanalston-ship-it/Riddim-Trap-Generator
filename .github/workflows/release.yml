@@ -1,0 +1,98 @@
+name: Release
+
+# Manual "run release workflow" pipeline:
+#  - computes the next version tag automatically (v1.0.0 for the first
+#    release, then bumps patch/minor/major per the input),
+#  - builds the Windows exe,
+#  - runs the headless smoke test,
+#  - creates the tag + GitHub Release with the exe assets.
+# The app's in-app update checker polls /releases/latest for these tags.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump for this release"
+        type: choice
+        default: patch
+        options: [patch, minor, major]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout (with tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next version
+        id: version
+        shell: bash
+        run: |
+          git fetch --tags --quiet
+          latest=$(git tag -l 'v*' --sort=-v:refname | head -1)
+          if [ -z "$latest" ]; then
+            next="1.0.0"
+          else
+            base="${latest#v}"; base="${base%%-*}"
+            IFS=. read -r MA MI PA <<< "$base"
+            case "${{ inputs.bump }}" in
+              major) next="$((MA+1)).0.0" ;;
+              minor) next="$MA.$((MI+1)).0" ;;
+              *)     next="$MA.$MI.$((PA+1))" ;;
+            esac
+          fi
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+          echo "tag=v$next"    >> "$GITHUB_OUTPUT"
+          echo "Releasing v$next (previous: ${latest:-none})"
+
+      - name: Cache JUCE
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: juce-8.0.4-windows-${{ runner.os }}
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -B build -DRTG_VERSION="${{ steps.version.outputs.version }}" \
+                -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        shell: bash
+        run: |
+          cmake --build build --config Release --target rtg_cli -j 4
+          cmake --build build --config Release --target RiddimTrapGenerator -j 4
+
+      - name: Smoke test (headless render)
+        shell: bash
+        run: |
+          ./build/Release/rtg_cli.exe --out smoke.wav --seconds 45 --seed 42
+          ./build/Release/rtg_cli.exe --out smoke_trap.wav --genre trap --seconds 45 --seed 7
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          exe="build/RiddimTrapGenerator_artefacts/Release/Riddim Trap Generator.exe"
+          ls -la "$(dirname "$exe")"
+          mkdir -p dist
+          cp "$exe" "dist/RiddimTrapGenerator-win64.exe"
+          cd dist
+          7z a "RiddimTrapGenerator-${{ steps.version.outputs.tag }}-win64.zip" \
+             "RiddimTrapGenerator-win64.exe"
+          ls -la
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Riddim Trap Generator ${{ steps.version.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            dist/RiddimTrapGenerator-win64.exe
+            dist/RiddimTrapGenerator-${{ steps.version.outputs.tag }}-win64.zip
