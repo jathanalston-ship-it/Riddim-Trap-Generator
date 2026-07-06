@@ -60,7 +60,7 @@ Recipe makeKickRecipe(float aggr, float dark, float nov, Rng& rng) {
     // an audible click (2-8 kHz share ~4-7%); this restores it. Level is
     // calibrated (kClickCal) so the rendered kick's 2-8 kHz energy share lands
     // near the profile's kickClickShare. Band-limited to <=6 kHz — no >8k fizz.
-    const float kClickCal = 13.0f;  // maps clickShare target -> layer amplitude
+    const float kClickCal = 82.0f;   // maps clickShare target -> layer amplitude
     p["clickAmt"]  = kClickCal * dp.kickClickShare * (0.85f + 0.45f * aggr);
     p["clickHz"]   = rng.rangef(3000.0f, 4200.0f);
     p["clickMs"]   = rng.rangef(0.004f, 0.008f);    // longer than a tick -> real 2-6k energy

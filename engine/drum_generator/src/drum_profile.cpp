@@ -79,10 +79,14 @@ std::vector<float> envelope(const std::vector<float>& x, double sr, double smoot
 }
 
 // Peak-pick onsets from a full-rate envelope. Returns onset sample indices.
-// Frame-hopped spectral-flux-style: positive envelope increase, local max,
-// above an adaptive threshold, respecting a minimum inter-onset gap.
+// Frame-hopped spectral-flux-style: positive envelope increase that is a local
+// max and clears a LOCAL adaptive threshold, respecting a minimum inter-onset
+// gap. The threshold is local (trailing mean of flux) rather than a fraction of
+// the global maximum, so one very loud transient elsewhere in the band cannot
+// suppress detection of the rest — detection in one band stays robust to level
+// changes in another (e.g. a hotter kick click must not hide snares).
 std::vector<size_t> pickOnsets(const std::vector<float>& env, double sr,
-                               double minGapSec, double threshRel) {
+                               double minGapSec, double threshMult) {
     std::vector<size_t> onsets;
     const size_t n = env.size();
     if (n < 4) return onsets;
@@ -100,16 +104,26 @@ std::vector<size_t> pickOnsets(const std::vector<float>& env, double sr,
     if (nf < 3) return onsets;
     // Positive flux.
     std::vector<float> flux(nf, 0.0f);
-    float gmax = 0.0f;
+    double meanFlux = 0.0; float gmax = 0.0f;
     for (size_t i = 1; i < nf; ++i) {
         flux[i] = std::max(0.0f, f[i] - f[i - 1]);
-        gmax = std::max(gmax, flux[i]);
+        meanFlux += flux[i]; gmax = std::max(gmax, flux[i]);
     }
     if (gmax <= 1e-12f) return onsets;
-    const float thr = threshRel * gmax;
+    meanFlux /= double(nf);
+    // Local threshold: trailing-window mean of flux, times a sensitivity mult,
+    // with a small global floor to reject noise-floor ripple.
+    const size_t wf = std::max<size_t>(4, size_t(std::llround(0.35 / (double(hop) / sr))));
+    const float floor = 0.05f * float(meanFlux) + 1e-9f;
     const size_t gapFrames = std::max<size_t>(1, size_t(std::llround(minGapSec / (double(hop) / sr))));
     size_t last = 0; bool have = false;
+    double run = 0.0; size_t runCnt = 0; size_t head = 0;
     for (size_t i = 1; i + 1 < nf; ++i) {
+        // advance trailing window [i-wf, i)
+        while (head < i) { run += flux[head]; ++runCnt; ++head; }
+        if (i > wf) { run -= flux[i - wf - 1]; --runCnt; }
+        double localMean = runCnt ? run / double(runCnt) : meanFlux;
+        float thr = std::max(floor, float(threshMult * localMean));
         if (flux[i] < thr) continue;
         if (flux[i] < flux[i - 1] || flux[i] < flux[i + 1]) continue; // local max
         if (have && (i - last) < gapFrames) {
@@ -270,23 +284,28 @@ DrumProfile extractDrumProfile(const StereoBuffer& audio, double sr, double bpmH
     const double winBeats = double(W) / sr / beatSec;
 
     // ---- Onsets ------------------------------------------------------------
-    std::vector<size_t> onLow   = pickOnsets(eLow,   sr, 0.090, 0.14);
-    std::vector<size_t> onBroad = pickOnsets(eBroad, sr, 0.070, 0.12);
-    std::vector<size_t> onCrack = pickOnsets(eCrack, sr, 0.170, 0.26);
-    std::vector<size_t> onHat   = pickOnsets(eHat,   sr, 0.050, 0.10);
+    std::vector<size_t> onLow   = pickOnsets(eLow,   sr, 0.090, 3.8);
+    std::vector<size_t> onBroad = pickOnsets(eBroad, sr, 0.070, 3.6);
+    std::vector<size_t> onCrack = pickOnsets(eCrack, sr, 0.170, 4.2);
+    std::vector<size_t> onHat   = pickOnsets(eHat,   sr, 0.050, 3.0);
 
     // ---- KICK: low-band onset WITH coincident 2..8 kHz transient (±12 ms) --
     const size_t tol = size_t(sr * 0.012);
-    std::vector<size_t> kicks;
+    std::vector<size_t> kicks;   // anchored at the click transient (broad onset)
     for (size_t lo : onLow) {
-        bool broadNear = false;
+        size_t bestBr = 0; bool broadNear = false;
         for (size_t br : onBroad) {
             size_t d = (br > lo) ? (br - lo) : (lo - br);
-            if (d <= tol) { broadNear = true; break; }
+            if (d <= tol) { broadNear = true; bestBr = br; break; }
         }
         if (broadNear) {
-            if (!kicks.empty() && lo - kicks.back() < size_t(sr * 0.12)) continue;
-            kicks.push_back(lo);
+            // Anchor ON the click transient (broad onset) so the click-share
+            // window captures the beater click rather than a misaligned sub/bass
+            // onset (in a full mix the coincident bass onset can precede it).
+            if (!kicks.empty() && bestBr > kicks.back() &&
+                bestBr - kicks.back() < size_t(sr * 0.12)) continue;
+            if (!kicks.empty() && bestBr <= kicks.back()) continue;   // keep ascending
+            kicks.push_back(bestBr);
         }
     }
 
@@ -302,13 +321,17 @@ DrumProfile extractDrumProfile(const StereoBuffer& audio, double sr, double bpmH
         double hz = dominantHzZCR(xSub, bodyS, e, sr);
         if (hz > 30.0 && hz < 130.0) vBody.push_back(float(hz));
         vDecay.push_back(float(decayTime(eLow, s, e, sr, 0.25) * 1000.0));
-        // Shares over the first 60 ms of the hit.
-        size_t sh = std::min(e, s + size_t(sr * 0.060));
-        double denom = energySq(xFull, s, sh);
-        if (denom > 1e-12) {
-            vClick.push_back(float(energySq(xBroad, s, sh) / denom));
-            vSub.push_back(float(energySq(xSub, s, sh) / denom));
-        }
+        // Click/knock share = 2-8 kHz energy fraction over the CLICK TRANSIENT
+        // window (~14 ms): the beater click is a sharp 2-8 kHz burst up front,
+        // while the ~50 Hz sub has barely completed a cycle this early, so the
+        // short window best isolates the kick's own click.
+        size_t shC = std::min(e, s + size_t(sr * 0.014));
+        double denomC = energySq(xFull, s, shC);
+        if (denomC > 1e-12) vClick.push_back(float(energySq(xBroad, s, shC) / denomC));
+        // Sub share reflects the sustained body -> longer 60 ms window.
+        size_t shS = std::min(e, s + size_t(sr * 0.060));
+        double denomS = energySq(xFull, s, shS);
+        if (denomS > 1e-12) vSub.push_back(float(energySq(xSub, s, shS) / denomS));
     }
 
     // ---- SNARE: crack-band onsets with strong 100..260 Hz body, not a kick -
