@@ -354,7 +354,7 @@ struct LFO {
         float v;
         if (shape == 0) v = float(std::sin(kTwoPi * phase));
         else v = float(4.0 * std::fabs(phase - 0.5) - 1.0);
-        phase += inc; if (phase >= 1.0) phase -= 1.0;
+        phase += inc; phase -= std::floor(phase);   // wrap any sign into [0,1)
         return v;
     }
 };
@@ -457,12 +457,13 @@ struct ShapeLFO {
             case 3: v = float(1.0 - 2.0 * phase); break;                  // ramp down
             case 4: v = phase < 0.5 ? 1.0f : -1.0f; break;               // square
             case 5: {                                                     // stepped
-                int s = int(phase * steps); if (s >= steps) s = steps - 1;
+                int s = int(phase * steps);
+                s = s < 0 ? 0 : (s >= steps ? steps - 1 : s);   // guard both ends
                 v = pat[size_t(s)]; break;
             }
             default: v = float(std::sin(kTwoPi * phase)); break;          // sine
         }
-        phase += inc; if (phase >= 1.0) phase -= 1.0;
+        phase += inc; phase -= std::floor(phase);   // wrap any sign into [0,1)
         return v;
     }
 };

@@ -127,7 +127,7 @@ StereoBuffer renderGrowl(const Recipe& rc, const Voice& v) {
     const float formantGain  = rc.get("formantGain", 2.6f);
     const float morphBase    = clampf(rc.get("morphBase", 0.2f), 0.0f, 1.0f);
     const float morphMod     = clampf(rc.get("morphMod", 0.6f), 0.0f, 1.0f);
-    const float lfoRate      = rc.get("lfoRate", 4.0f);
+    const float lfoRate      = std::max(0.02f, rc.get("lfoRate", 4.0f));  // never negative (mutation-safe)
     const float lfoDepth     = clampf(rc.get("lfoDepth", 0.45f), 0.0f, 1.0f);
     const int   lfoShape     = std::clamp(int(rc.get("lfoShape", 0.0f)), 0, 5);
     const int   lfoSteps     = std::clamp(int(rc.get("lfoSteps", 4.0f)), 1, 16);
@@ -138,7 +138,7 @@ StereoBuffer renderGrowl(const Recipe& rc, const Voice& v) {
     const float midFreq      = rc.get("midFreq", 1400.0f);
     const float highShelfDb  = rc.get("highShelfDb", 0.0f);
     const float ottAmt       = clampf(rc.get("ottAmt", 0.28f), 0.0f, 1.0f);
-    const float phaserRate   = rc.get("phaserRate", 0.6f);
+    const float phaserRate   = std::max(0.02f, rc.get("phaserRate", 0.6f));
     const float phaserMix    = clampf(rc.get("phaserMix", 0.3f), 0.0f, 1.0f);
     const float width        = clampf(rc.get("width", 0.12f), 0.0f, 0.6f);
     const float ampAtk       = rc.get("ampAtk", 0.008f);
@@ -363,11 +363,11 @@ StereoBuffer renderScreech(const Recipe& rc, const Voice& v) {
     const float formantGain = rc.get("formantGain", 2.5f);
     const float morphBase = clampf(rc.get("morphBase", 0.2f), 0.0f, 1.0f);
     const float morphMod = clampf(rc.get("morphMod", 0.6f), 0.0f, 1.0f);
-    const float lfoRate = rc.get("lfoRate", 4.0f);
+    const float lfoRate = std::max(0.02f, rc.get("lfoRate", 4.0f));  // never negative (mutation-safe)
     const float lfoDepth = clampf(rc.get("lfoDepth", 0.5f), 0.0f, 1.0f);
     const int   lfoShape = std::clamp(int(rc.get("lfoShape", 0.0f)), 0, 5);
     const int   lfoSteps = std::clamp(int(rc.get("lfoSteps", 4.0f)), 1, 16);
-    const float phaserRate = rc.get("phaserRate", 1.5f);
+    const float phaserRate = std::max(0.02f, rc.get("phaserRate", 1.5f));
     const float phaserDepth = clampf(rc.get("phaserDepth", 0.6f), 0.0f, 1.0f);
     const float phaserCenter = rc.get("phaserCenter", 2000.0f);
     const float combFb = clampf(rc.get("combFb", 0.5f), 0.0f, 0.85f);
