@@ -61,11 +61,14 @@ Recipe makeGrowlRecipe(float aggr, float dark, float nov, Rng& rng) {
     p["drivePost"]    = 1.2f + aggr * 2.2f;
     p["wsMix"]        = clampf(aggr * 0.7f + rng.rangef(-0.1f, 0.2f), 0.0f, 1.0f);
     // --- formant / vowel bank (the talk) ---
+    // Bias vowel choice toward the bright, high-F2 vowels (E/I) so the vocal
+    // energy centres in the 600-2500 Hz presence lane, not the mud below.
     float v0, v1, v2; pickVowelPath(rng, v0, v1, v2);
     p["vowel0"] = v0; p["vowel1"] = v1; p["vowel2"] = v2;
     p["formantQ"]     = rng.rangef(5.0f, 11.0f);
-    p["formantMix"]   = rng.rangef(0.55f, 0.85f);   // formant vs body path
-    p["formantGain"]  = rng.rangef(2.0f, 3.2f);
+    p["formantMix"]   = rng.rangef(0.62f, 0.90f);   // formant (up-shifted) over low body
+    p["formantGain"]  = rng.rangef(2.2f, 3.4f);
+    p["formantShift"] = rng.rangef(1.20f, 1.45f);   // octave-scale formants UP into presence
     p["morphBase"]    = rng.rangef(0.05f, 0.35f);
     p["morphMod"]     = rng.rangef(0.45f, 0.75f);   // note.mod influence
     // --- rhythmic modulation ---
@@ -74,12 +77,15 @@ Recipe makeGrowlRecipe(float aggr, float dark, float nov, Rng& rng) {
     p["lfoShape"]     = float(rng.intRange(0, 5));
     p["lfoSteps"]     = float(rng.intRange(2, 8));
     // --- body filter ---
-    p["lpMul"]        = rng.rangef(3.0f, 7.0f) - dark * 1.5f;
+    p["lpMul"]        = rng.rangef(4.0f, 8.0f) - dark * 1.5f;
     p["lpQ"]          = rng.rangef(0.7f, 1.6f);
     // --- output EQ / glue ---
-    p["hpFreq"]       = rng.rangef(92.0f, 110.0f);
-    p["midGainDb"]    = rng.rangef(2.5f, 6.0f);
-    p["midFreq"]      = rng.rangef(800.0f, 2200.0f);
+    // HP raised into 125-155 Hz: the growl's OWN 100-400 Hz content is what makes
+    // the low-mid mud; the sub lane owns everything below. Presence peak pushed
+    // harder and centred in the 950-1800 Hz vocal band.
+    p["hpFreq"]       = rng.rangef(125.0f, 155.0f);
+    p["midGainDb"]    = rng.rangef(4.5f, 8.5f);
+    p["midFreq"]      = rng.rangef(950.0f, 1800.0f);
     p["highShelfDb"]  = 3.0f - dark * 9.0f;
     p["ottAmt"]       = rng.rangef(0.15f, 0.4f);
     // --- movement polish ---
@@ -171,6 +177,7 @@ StereoBuffer renderGrowl(const Recipe& rc, const Voice& v) {
     const double formantQ    = std::max(1.5, double(rc.get("formantQ", 8.0f)));
     const float formantMix   = clampf(rc.get("formantMix", 0.7f), 0.0f, 1.0f);
     const float formantGain  = rc.get("formantGain", 2.6f);
+    const float formantShift = clampf(rc.get("formantShift", 1.0f), 0.9f, 1.6f);
     const float morphBase    = clampf(rc.get("morphBase", 0.2f), 0.0f, 1.0f);
     const float morphMod     = clampf(rc.get("morphMod", 0.6f), 0.0f, 1.0f);
     const float lfoRate      = std::max(0.02f, rc.get("lfoRate", 4.0f));  // never negative (mutation-safe)
@@ -220,10 +227,13 @@ StereoBuffer renderGrowl(const Recipe& rc, const Voice& v) {
     }
 
     FormantBank formant;
+    // Up-tilt the formant bank so the vocal energy centres on F2/F3 (the
+    // 800-2500 Hz presence lane) instead of the low F1 that fed the mud.
+    formant.g1 = 0.55f; formant.g2 = 1.00f; formant.g3 = 0.68f;
     SVF svf;
     Biquad mud;  mud.setPeak(300.0, 0.9, mudDb, sr);
     Biquad hp;   hp.setHighpass(hpFreq, 0.707, sr);
-    Biquad loSh; loSh.setLowShelf(210.0, -4.0, sr);   // cede lows to the sub lane
+    Biquad loSh; loSh.setLowShelf(340.0, -7.0, sr);   // cede low-mids to the sub lane
     Biquad midPk; midPk.setPeak(midFreq, 1.1, midGainDb, sr);
     Biquad hsh;  hsh.setHighShelf(4200.0, highShelfDb, sr);
     Allpass1 ap1, ap2, ap3, apR;
@@ -260,7 +270,10 @@ StereoBuffer renderGrowl(const Recipe& rc, const Voice& v) {
     float  gritHold = 0.0f;
     const float gritLevels = std::pow(2.0f, gritBits - 1.0f);
 
-    const double baseCut = freq * lpMul;
+    // Body lowpass floor: for a low growl fundamental, freq*lpMul lands the body
+    // path entirely in the mud (120-500 Hz). Floor it so the body carries real
+    // mid harmonics up into the presence lane.
+    const double baseCut = std::max(freq * double(lpMul), 480.0);
     const size_t gateN = size_t(std::llround(v.gateSec * sr));
     int coefCtr = 0;
     float lval = 0.0f;
@@ -316,7 +329,7 @@ StereoBuffer renderGrowl(const Recipe& rc, const Voice& v) {
         if ((coefCtr & 7) == 0) {
             lval = lfo.tick();
             float morph = clampf(morphBase + morphMod * mod + lfoDepth * 0.5f * lval, 0.0f, 1.0f);
-            Vowel vw = vowelMorph(vpath, 3, morph, 1.0f);
+            Vowel vw = vowelMorph(vpath, 3, morph, formantShift);
             formant.set(vw.f1, vw.f2, vw.f3, formantQ, sr);
             double cut = baseCut * (1.0 + 0.6 * mod + 0.4 * lfoDepth * lval);
             svf.set(cut, lpQ, sr);

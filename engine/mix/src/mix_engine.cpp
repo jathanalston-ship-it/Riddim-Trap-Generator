@@ -21,7 +21,7 @@ namespace {
 // Balance target (doc 07): low band (20-120 Hz) carries ~40-50% of drop
 // energy, mid-bass character audibly on top — sub supports, growls lead.
 constexpr float kLaneGainDb[kLaneCount] = {
-    /*Sub*/ -13.5f, /*BassA*/ -6.5f, /*BassB*/ -7.5f, /*BassC*/ -10.0f,
+    /*Sub*/ -13.5f, /*BassA*/ -2.0f, /*BassB*/ -3.0f, /*BassC*/ -6.0f,
     /*Kick*/ -9.0f, /*Snare*/ -7.0f, /*HatClosed*/ -16.0f, /*HatOpen*/ -17.0f,
     /*Perc*/ -15.5f, /*Melody*/ -12.0f, /*Pad*/ -15.0f, /*Riser*/ -12.5f,
     /*Downlifter*/ -12.5f, /*Impact*/ -8.0f, /*Crash*/ -12.0f,
@@ -243,6 +243,11 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
         for (size_t i = 0; i < N; ++i) { bassBus.l[i] += b.l[i]; bassBus.r[i] += b.r[i]; }
     }
     if (anyBass) {
+        // Low-mid mud dip + presence lift: pull the growl's residual 250-420 Hz
+        // energy down and push its 1.3 kHz vocal band forward so the bass bus
+        // carries the mid/presence lane the references sit in (7-15%).
+        applyStereo(makePeaking(sr, 330.0, -3.5, 1.1), bassBus);
+        applyStereo(makePeaking(sr, 1300.0, 4.0, 0.9), bassBus);
         tanhSaturate(bassBus, 1.0 + 2.0 * plan.mixAggression);
         ottLite(bassBus, sr, 120.0, 2500.0, 0.25 + 0.35 * plan.mixAggression);
         applyWidth(bassBus, 0.30f);   // a touch of upper-bass stereo interest
@@ -366,6 +371,14 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
             drumBus.r[i] *= float(g);
         }
     }
+
+    // --- Drum-bus low-mid tame (reference band-matching) -------------------
+    // Isolation analysis showed the drum bus carries the bulk of the generated
+    // 120-500 Hz lump (loM ~22% vs reference ~10%) which masks the mid/presence
+    // lane. A gentle wide peaking cut at ~300 Hz pulls the drum body out of the
+    // growl's vocal register without touching the kick's sub punch (<120 Hz).
+    applyStereo(makePeaking(sr, 320.0, -6.0, 0.8), drumBus);
+    applyStereo(makePeaking(sr, 180.0, -3.0, 1.1), drumBus);
 
     // --- Sum buses ---------------------------------------------------------
     for (size_t i = 0; i < N; ++i) {

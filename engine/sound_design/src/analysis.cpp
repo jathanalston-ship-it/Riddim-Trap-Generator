@@ -175,13 +175,15 @@ float rate(Role role, const Features& f) {
     const float c = f.centroidHz;
     switch (role) {
         case Role::Growl:
-            // Reward the vocal "talk": moving spectral peaks in 300-2500 Hz,
-            // mid-high presence, vocal centroid; penalize static + sub-heavy.
+            // Reference growls scream in the 600-2500 Hz vocal band (centroid
+            // ~3 kHz in the mix, brighter still in the sub-less isolated preview).
+            // Reward bright, moving, mid-forward peaks and penalize sub-heavy mud
+            // so library evolution reinforces the presence lane, not the low-mid.
             return blend({
-                {rampUp(f.movement, 0.15f, 0.40f), 1.3f},          // peaks that MOVE
-                {band(f.aggression, 0.28f, 0.75f, 0.18f), 0.9f},   // 600-2500 presence proxy
-                {band(c, 380.0f, 1900.0f, 350.0f), 0.9f},          // vocal centroid
-                {rampDown(f.subRatio, 0.40f, 0.60f), 1.0f},        // penalize >0.5 sub
+                {rampUp(f.movement, 0.15f, 0.40f), 1.1f},          // peaks that MOVE
+                {band(f.aggression, 0.32f, 0.85f, 0.18f), 1.0f},   // mid-high presence proxy
+                {band(c, 1200.0f, 6000.0f, 900.0f), 1.1f},         // BRIGHT vocal centroid
+                {rampDown(f.subRatio, 0.30f, 0.55f), 1.0f},        // penalize sub-heavy mud
                 {band(f.crestDb, 5.0f, 15.0f, 5.0f), 0.5f},
             });
         case Role::Screech:
