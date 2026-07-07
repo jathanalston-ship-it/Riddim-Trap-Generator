@@ -37,7 +37,7 @@ struct DrumProfile {
     // ---- HATS ----------------------------------------------------------------
     float hatDensityPerBeat = 2.8f;  // hat events per beat in drops (2.4..3.2)
     float hatDecayMs        = 78.0f; // hat-band decay time (37..120)
-    float hatCentroidHz     = 8800.0f;// hat-band spectral centroid (8600..9000)
+    float hatCentroidHz     = 10800.0f;// hat-band spectral centroid (crisp top)
 
     int refCount = 0;                // number of reference files aggregated
 

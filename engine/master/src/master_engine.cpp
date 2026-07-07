@@ -272,11 +272,29 @@ StereoBuffer masterize(const StereoBuffer& premaster, const Plan& plan,
             tilt += std::clamp(-double(prof.spectralTiltDbPerOct) * 0.35, -2.0, 2.0);
     }
     {
+        // Floor the darkness-driven top cut at -1 dB: the references are all
+        // BRIGHT (centroid ~3.5-5 kHz), so a dark track must not lose its highs.
         Biquad lsL = lowShelf(sampleRate, 120.0, tilt), lsR = lsL;
-        Biquad hsL = highShelf(sampleRate, 6000.0, -tilt), hsR = hsL;
+        Biquad hsL = highShelf(sampleRate, 6000.0, std::max(-1.0, -tilt)), hsR = hsL;
         for (size_t i = 0; i < n; ++i) {
             base.l[i] = hsL.process(lsL.process(base.l[i]));
             base.r[i] = hsR.process(lsR.process(base.r[i]));
+        }
+    }
+
+    // [1b] AIR + PRESENCE. The generated master reads far darker than every
+    // reference (centroid ~1.7 kHz / 6-12k ~6% vs refs ~4.5 kHz / ~20%). Add a
+    // presence shelf (~3.5 kHz) for growl/horn/hat bite and a broad air shelf
+    // (~9 kHz) for the crisp, expensive top the references have. Slightly less
+    // on very dark palettes so it never gets harsh.
+    {
+        const double presDb = 3.0 - double(plan.darkness01) * 1.0;   // +2..+3 dB
+        const double airDb  = 5.0 - double(plan.darkness01) * 1.5;   // +3.5..+5 dB
+        Biquad prL = highShelf(sampleRate, 3500.0, presDb), prR = prL;
+        Biquad arL = highShelf(sampleRate, 9000.0, airDb),  arR = arL;
+        for (size_t i = 0; i < n; ++i) {
+            base.l[i] = arL.process(prL.process(base.l[i]));
+            base.r[i] = arR.process(prR.process(base.r[i]));
         }
     }
 

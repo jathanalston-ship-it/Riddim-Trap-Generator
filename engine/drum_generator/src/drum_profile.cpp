@@ -435,7 +435,7 @@ const DrumProfile& DrumProfile::builtinReference() {
         d.snareTonality     = 0.25f;
         d.hatDensityPerBeat = 2.8f;
         d.hatDecayMs        = 78.0f;
-        d.hatCentroidHz     = 8800.0f;
+        d.hatCentroidHz     = 10800.0f;   // crisper hats — references sit far brighter
         d.refCount          = 2;
         return d;
     }();
