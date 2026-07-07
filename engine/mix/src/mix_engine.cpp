@@ -22,8 +22,8 @@ namespace {
 // energy, mid-bass character audibly on top — sub supports, growls lead.
 constexpr float kLaneGainDb[kLaneCount] = {
     /*Sub*/ -17.0f, /*BassA*/ -2.5f, /*BassB*/ -3.0f, /*BassC*/ -7.0f,
-    /*Kick*/ -9.0f, /*Snare*/ -6.5f, /*HatClosed*/ -12.5f, /*HatOpen*/ -13.5f,
-    /*Perc*/ -13.5f, /*Melody*/ -12.0f, /*Pad*/ -15.0f, /*Riser*/ -12.5f,
+    /*Kick*/ -8.0f, /*Snare*/ -5.5f, /*HatClosed*/ -9.0f, /*HatOpen*/ -10.0f,
+    /*Perc*/ -11.0f, /*Melody*/ -12.0f, /*Pad*/ -15.0f, /*Riser*/ -12.5f,
     /*Downlifter*/ -12.5f, /*Impact*/ -8.0f, /*Crash*/ -11.0f,
 };
 
