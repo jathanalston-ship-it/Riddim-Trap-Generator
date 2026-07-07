@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 # earview — "ears via eyes" for the sound-design loop. Renders audio into images
-# a vision model can read. Subcommands:
+# a vision model can read, and prints numeric fingerprints. Subcommands:
 #   spec   <wav> <bpm> <out.png> [start|auto] [bars] [scorefile] [lane]
 #   stems  <dir> <bpm> <out.png> [bars]        # per-lane spectrogram strips + clean onset grids
 #   compare<wavA> <wavB> <bpm> <out.png> [bars]# A vs B spectrograms + sub-envelope "pumping" plot
+#   fp     <wav> [bars] [bpm]                  # QUANTITATIVE fingerprint: band shares, pump
+#                                              # depth, crest, centroid, growl odd/wobble.
+#                                              # Auto-detects tempo + drop window if bpm omitted.
 # Deps: numpy, scipy (+ stdlib zlib/struct). No matplotlib/PIL.
 import sys, os, struct, zlib, glob, numpy as np
 from scipy.signal import stft, butter, sosfiltfilt, find_peaks
@@ -160,11 +163,66 @@ def cmd_compare(a):
         x,sr=load_wav(wav); seg,_=pick_window(x,sr,bpm,bars,'auto')
         print_grid(onset_grid(seg,sr,bpm,bars),bars,label=f"## {lab}: {os.path.basename(wav)}")
 
+# ------------------------------------------------------------------ fingerprint
+# Quantitative features so tracks compare on the same axes (not just by eye).
+# Reference band shares (drop, 4 bars): riddim sits subLow ~58-65, sub 8-16,
+# bass 5-8, mid(800-2500) 5-14, hi+air 4-14; deep-pump refs dipRatio 0.9,
+# wall-style refs ~0.3; growl oddRatio 0.5-0.63 (square-ish).
+def _tempo(x,sr):
+    w=int(0.01*sr); e=np.convolve(np.abs(x),np.ones(w)/w,'same')
+    le=np.log(e+1e-4); flux=np.diff(le,prepend=le[0]); flux[flux<0]=0
+    ds=max(1,int(sr/200)); f=flux[::ds]; f=f-f.mean()
+    ac=np.correlate(f,f,'full')[len(f)-1:]; best=(120.0,0)
+    for bpm in np.arange(70,190,0.25):
+        lag=int((60.0/bpm)*200)
+        if lag<len(ac) and ac[lag]>best[1]: best=(bpm,ac[lag])
+    return best[0]
+
+def _bandshares(seg,sr):
+    f,t,Z=stft(seg,sr,nperseg=4096,noverlap=3072); P=np.abs(Z)**2
+    edges=[(20,60),(60,120),(120,300),(300,800),(800,2500),(2500,6000),(6000,16000)]
+    names=['subLow','sub','bass','lowmid','mid','hi','air']; tot=P.sum()+1e-12
+    return {nm:float(P[(f>=lo)&(f<hi)].sum()/tot) for (lo,hi),nm in zip(edges,names)}
+
+def _pump(seg,sr):
+    sb=band(seg,sr,30,120); w=int(0.01*sr)
+    e=np.convolve(np.abs(sb),np.ones(w)/w,'same'); e/=(e.max()+1e-9)
+    lo=np.percentile(e,15); hi=np.percentile(e,85)
+    return dict(dip=1.0-lo/(hi+1e-9),p15=float(lo),p85=float(hi))
+
+def _growl(seg,sr):
+    b=band(seg,sr,120,1200); c=b[len(b)//3:len(b)//3+int(0.3*sr)]
+    ac=np.correlate(c,c,'full')[len(c)-1:]; lo=int(sr/400); hi=int(sr/40)
+    f0=sr/(lo+np.argmax(ac[lo:hi])) if hi<len(ac) else 80.0
+    N=len(b); freqs=np.fft.rfftfreq(N,1/sr); mag=np.abs(np.fft.rfft(b))
+    at=lambda fr:(lambda k:mag[max(0,k-2):k+3].sum())(int(np.argmin(np.abs(freqs-fr))))
+    odd=sum(at(f0*h) for h in (1,3,5,7,9)); even=sum(at(f0*h) for h in (2,4,6,8))
+    env=np.abs(band(seg,sr,120,4000)); w=int(0.004*sr)
+    env=np.convolve(env,np.ones(w)/w,'same')[::max(1,int(sr/400))]; env=env-env.mean()
+    sp=np.abs(np.fft.rfft(env*np.hanning(len(env)))); ef=np.fft.rfftfreq(len(env),1/400.0)
+    m=(ef>=2)&(ef<=16); wob=float(ef[m][np.argmax(sp[m])]) if m.any() else 0.0
+    return dict(f0=float(f0),odd=odd/(odd+even+1e-9),wob=wob)
+
+def cmd_fp(a):
+    wav=a[0]; bars=int(a[1]) if len(a)>1 else 4
+    x,sr=load_wav(wav); bpm=float(a[2]) if len(a)>2 else round(_tempo(x,sr),1)
+    seg,t0=pick_window(x,sr,bpm,bars,'auto')
+    bs=_bandshares(seg,sr); pd=_pump(seg,sr); gr=_growl(seg,sr)
+    rms=np.sqrt(np.mean(seg**2))+1e-9; pk=np.max(np.abs(seg))+1e-9
+    f,_,Z=stft(seg,sr,nperseg=2048,noverlap=1536); Pm=np.abs(Z).mean(1)
+    cen=(f*Pm).sum()/(Pm.sum()+1e-9)
+    print(f"=== {os.path.basename(wav)}  bpm~{bpm:.1f}  drop@{t0:.1f}s  {bars}bars  "
+          f"crest {20*np.log10(pk/rms):.1f}dB  centroid {cen:.0f}Hz")
+    print("  bands%: "+"  ".join(f"{k} {v*100:4.1f}" for k,v in bs.items()))
+    print(f"  PUMP dipRatio {pd['dip']:.2f} (0=wall 1=to-silence)  p15 {pd['p15']:.2f} p85 {pd['p85']:.2f}")
+    print(f"  GROWL f0 {gr['f0']:.0f}Hz  oddRatio {gr['odd']:.2f}  wobble {gr['wob']:.1f}Hz")
+
 def main():
-    if len(sys.argv)<2: print("usage: earview.py spec|stems|compare ..."); return
+    if len(sys.argv)<2: print("usage: earview.py spec|stems|compare|fp ..."); return
     c=sys.argv[1]
     if c=='stems': cmd_stems(sys.argv[2:])
     elif c=='compare': cmd_compare(sys.argv[2:])
+    elif c=='fp': cmd_fp(sys.argv[2:])
     elif c=='spec': cmd_spec(sys.argv[2:])
     else: cmd_spec(sys.argv[1:])   # back-compat: earview.py <wav> <bpm> <out> ...
 main()
