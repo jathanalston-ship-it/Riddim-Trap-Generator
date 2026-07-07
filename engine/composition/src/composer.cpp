@@ -259,26 +259,43 @@ void Comp::addBass(const Section& s, Rng& r, int skipFirstBar) {
     // Handled entirely here (dedicated path) so the classic call/response riddim
     // below — used by non-drop riddim sections — keeps its exact RNG draw order.
     if (tearout) {
+        // The chug EVOLVES across the drop: each 4-bar phrase picks a chug MODE
+        // so the drop "switches up" (the signature riddim move) instead of 16-32
+        // bars of one pattern. Mode 0 = straight 8ths (establish), 1 = DOUBLE-
+        // TIME 16ths (the hard switch), 2 = SYNCOPATED off-beat stabs. The growl
+        // also "talks": the per-note mod sweeps across each bar (formant/filter
+        // movement) rather than sitting static. All deterministic per seed.
         for (int b = 0; b < bars; ++b) {
             if (b < skipFirstBar) continue;
+            const int phrase = (b - skipFirstBar) / 4;
+            int mode = 0;
+            if (phrase > 0) {   // first phrase establishes; later phrases can switch
+                Rng pr = Rng(plan.params.seed).stream("chugmode", s.startBar * 97 + phrase);
+                std::vector<double> mw = {1.5, 1.0 + 1.2 * agg, 0.7};
+                mode = pr.pickWeighted(mw, 1.0);
+            }
+            const int steps    = (mode == 1) ? 16 : 8;
+            const double stepB = (mode == 1) ? 0.25 : 0.5;
 
-            // 8 straight eighths per bar. On-beats always chug; off-beats fill.
-            bool hit[8];
-            for (int e = 0; e < 8; ++e) {
-                if ((e % 2) == 0) { hit[e] = true; continue; } // on-beat: locked
-                // Busier chug (fills the gaps like the reference's near-constant
-                // 8ths); off-beats now hit most of the time even at mid aggression.
-                const double p = 0.62 + 0.33 * agg + 0.10 * plan.complexity01;
-                hit[e] = r.chance(std::min(0.98, p));           // busier with aggr
+            bool hit[16] = {false};
+            for (int e = 0; e < steps; ++e) {
+                if (mode == 2) {                          // syncopated: lean off-beats
+                    if (e % 2 == 1) { hit[e] = true; continue; }
+                    hit[e] = r.chance(0.5 + 0.3 * agg);
+                    continue;
+                }
+                const bool onBeat = (mode == 1) ? (e % 4 == 0) : (e % 2 == 0);
+                if (onBeat) { hit[e] = true; continue; }
+                double p = 0.62 + 0.33 * agg + 0.10 * plan.complexity01;
+                if (mode == 1) p = (e % 2 == 0) ? 0.9 : (0.45 + 0.4 * agg); // DT: 8ths solid, 16ths fill
+                hit[e] = r.chance(std::min(0.98, p));
             }
 
-            // Precompute stab (slot,time) pairs so lengths clamp to the next
-            // onset — guarantees staccato, no overlapping starts within BassA.
             std::vector<std::pair<int, double>> stabs;
-            for (int e = 0; e < 8; ++e)
-                if (hit[e]) stabs.emplace_back(e, base + b * BPB + e * 0.5);
+            for (int e = 0; e < steps; ++e)
+                if (hit[e]) stabs.emplace_back(e, base + b * BPB + e * stepB);
 
-            int distinctCap = (plan.melody01 < 0.3f) ? 1 : 2; // melodic restraint
+            int distinctCap = (plan.melody01 < 0.3f) ? 1 : 2;
             int distinctUsed = 0, lastOff = 0;
 
             for (size_t si = 0; si < stabs.size(); ++si) {
@@ -287,12 +304,9 @@ void Comp::addBass(const Section& s, Rng& r, int skipFirstBar) {
                 const double nextT = (si + 1 < stabs.size())
                                          ? stabs[si + 1].second
                                          : base + (b + 1) * BPB;
-                // Short, punchy staccato — never overrun the next chug; tighter
-                // (shorter) as aggression rises.
-                const double maxLen = std::max(0.06, (nextT - t) * 0.9);
-                const double len = std::min(0.30 - 0.08 * agg, maxLen);
+                const double maxLen = std::max(0.05, (nextT - t) * 0.9);
+                const double len = std::min((mode == 1 ? 0.16 : 0.30) - 0.06 * agg, maxLen);
 
-                // PITCH: mostly ROOT; rare octave / dark scale move for variety.
                 int off = 0;
                 if (si != 0 && distinctUsed < distinctCap
                     && r.chance(0.06 + 0.30 * plan.melody01 * plan.complexity01)) {
@@ -304,34 +318,33 @@ void Comp::addBass(const Section& s, Rng& r, int skipFirstBar) {
                 }
                 lastOff = off;
 
-                // ARTICULATION ("talk"): alternate per beat/off-beat so the growl
-                // moves; occasional sweep accent.
-                float artic = ((e & 2) == 0) ? 0.24f : 0.58f;
-                if (r.chance(0.12)) artic = 0.95f; // sweep accent
-                artic = std::min(1.0f, artic * (0.70f + 0.55f * pal.aggression01));
+                // TALK: the growl mod SWEEPS across the bar (slow raised-cosine over
+                // the 4 beats) + a per-phrase bias, so the formant/filter MOVES like
+                // the reference instead of a static chug — still a stab per hit, not
+                // a wobble. Deterministic (function of bar position + phrase).
+                const double barPos = (t - (base + b * BPB)) / BPB;      // 0..1 across bar
+                const float sweep = 0.5f * (1.0f - std::cos(float(barPos) * 6.2831853f));
+                const float phraseBias = 0.12f * float(phrase % 3);
+                float artic = std::clamp(0.20f + 0.55f * sweep + phraseBias, 0.0f, 1.0f);
+                if (r.chance(0.10)) artic = 0.95f; // occasional full-open sweep accent
+                artic = std::min(1.0f, artic * (0.75f + 0.5f * pal.aggression01));
 
-                // Velocity: accent the downbeat, strong on beats, punchy off-beats.
-                float velBase = (e == 0) ? 0.98f : ((e % 2 == 0) ? 0.92f : 0.84f);
+                const bool eOnBeat = (mode == 1) ? (e % 4 == 0) : (e % 2 == 0);
+                float velBase = (e == 0) ? 0.98f : (eOnBeat ? 0.9f : 0.82f);
                 velBase = std::min(1.0f, velBase + 0.05f * float(agg));
                 add(Lane::BassA, t, len, bassPitch(off), hvel(r, velBase), artic);
             }
 
-            // BassB = HORN/STAB layer: an aggressive synth stab locked to every
-            // chug alongside the BassA growl (the two-tonal-bass architecture of
-            // reference riddim — growl + horn over a constant sub). On-beats
-            // always stab; off-beats follow the same hit[] fills as the growl so
-            // the two voices interlock exactly. Pitched mostly root, with an
-            // occasional octave-up bark for the "horn" bite. Short/punchy.
-            for (int e = 0; e < 8; ++e) {
+            // BassB = HORN/STAB layer, locked to the same hits on the same grid
+            // (the two-tonal-bass architecture: growl + horn over the sub).
+            for (int e = 0; e < steps; ++e) {
                 if (!hit[e]) continue;
-                const double t = base + b * BPB + e * 0.5;
-                const double nextT = base + b * BPB + (e + 1) * 0.5;
-                const double len = std::min(0.22, (nextT - t) * 0.85);
-                // Horn mostly doubles the root; rare octave-up stab for bite.
+                const double t = base + b * BPB + e * stepB;
+                const double len = std::min(mode == 1 ? 0.14 : 0.22, stepB * 0.85);
                 int hoff = (r.chance(0.14 + 0.20 * plan.melody01)) ? 12 : 0;
-                // Bright, forward articulation so the formant "horn" opens up.
                 float hartic = std::min(1.0f, 0.55f + 0.40f * pal.aggression01);
-                float hvelBase = (e == 0) ? 0.94f : ((e % 2 == 0) ? 0.86f : 0.78f);
+                const bool eOnBeat = (mode == 1) ? (e % 4 == 0) : (e % 2 == 0);
+                float hvelBase = eOnBeat ? 0.9f : 0.78f;
                 add(Lane::BassB, t, len, bassPitch(hoff), hvel(r, hvelBase), hartic);
             }
 
