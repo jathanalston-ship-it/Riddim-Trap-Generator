@@ -21,10 +21,10 @@ namespace {
 // Balance target (doc 07): low band (20-120 Hz) carries ~40-50% of drop
 // energy, mid-bass character audibly on top — sub supports, growls lead.
 constexpr float kLaneGainDb[kLaneCount] = {
-    /*Sub*/ -10.5f, /*BassA*/ -5.5f, /*BassB*/ -6.5f, /*BassC*/ -8.0f,
-    /*Kick*/ -9.0f, /*Snare*/ -7.0f, /*HatClosed*/ -16.0f, /*HatOpen*/ -17.0f,
-    /*Perc*/ -15.5f, /*Melody*/ -12.0f, /*Pad*/ -15.0f, /*Riser*/ -12.5f,
-    /*Downlifter*/ -12.5f, /*Impact*/ -8.0f, /*Crash*/ -12.0f,
+    /*Sub*/ -17.0f, /*BassA*/ -2.0f, /*BassB*/ -3.5f, /*BassC*/ -6.0f,
+    /*Kick*/ -9.0f, /*Snare*/ -6.5f, /*HatClosed*/ -12.5f, /*HatOpen*/ -13.5f,
+    /*Perc*/ -13.5f, /*Melody*/ -12.0f, /*Pad*/ -15.0f, /*Riser*/ -12.5f,
+    /*Downlifter*/ -12.5f, /*Impact*/ -8.0f, /*Crash*/ -11.0f,
 };
 
 // --- Depth send/tilt tables (parallel to kLaneGainDb) ----------------------
@@ -211,8 +211,13 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
     const float snareMin = dbToGain((riddim ? -12.0f : -4.5f) * pumpDepth);
     const float hatMin   = dbToGain(-1.5f * plan.sidechainDepth);
     const float percMin  = dbToGain(-2.0f * plan.sidechainDepth);
+    // The KICK pump gets a longer release than the drum-clarity ducks: the sub
+    // stays ducked well into the gap then swells back, so the low end reads as a
+    // deep pumping arch (ref dipRatio 0.9) rather than a quick notch. Riddim
+    // kicks are half-time (~2 beats apart) so there is room for a long swell.
+    const double kickPumpRel = riddim ? spb * 0.42 : scRelSec;
     std::vector<float> bassChainDuck =
-        buildDuckEnv(score.notes(Lane::Kick), N, spb, sr, 2.0, 10.0, scRelSec, bassKickMin);
+        buildDuckEnv(score.notes(Lane::Kick), N, spb, sr, 2.0, 10.0, kickPumpRel, bassKickMin);
     auto mergeDuck = [&](const std::vector<float>& d) {
         for (size_t i = 0; i < N; ++i) if (d[i] < bassChainDuck[i]) bassChainDuck[i] = d[i];
     };
@@ -257,7 +262,7 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
         subBus = laneBuf(Lane::Sub);
         forceMono(subBus);                        // sub forced mono
         applyStereo(makeLowpass(sr, 120.0), subBus);  // sub OWNS <120 Hz (clean crossover)
-        applyStereo(makeHighpass(sr, 25.0), subBus);
+        applyStereo(makeHighpass(sr, 35.0), subBus);  // kill sub-35 rumble that bloats the 20-60 band
         applyEnv(subBus, bassChainDuck);          // whole bass chain ducks to ALL drums
     }
 
@@ -286,9 +291,12 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
         // Multiband distortion: keep <100 Hz CLEAN (sub tight) and tanh-drive the
         // mid/high band only, so harmonics scream where the presence lift sits.
         driveAboveClean(bassBus, sr, 240.0, 1.4 + 2.2 * plan.mixAggression);
-        // Lighter glue than before: less multiband density -> more transient
-        // crest/punch survives (density was flattening the drop to crest ~2.4).
-        ottLite(bassBus, sr, 120.0, 2500.0, 0.10 + 0.15 * plan.mixAggression);
+        // HEAVY OTT (the riddim/dubstep density trick): the growl is a very peaky
+        // stab (raw crest ~28, RMS ~24 dB below the sub) so its mid/scream is
+        // inaudible in the sum. Strong upward multiband compression lifts the
+        // growl's sustained harmonics into a dense, present WALL so the mid/
+        // presence lane the references sit in (5-14%) actually reads.
+        ottLite(bassBus, sr, 120.0, 2500.0, 0.45 + 0.30 * plan.mixAggression);
         applyWidth(bassBus, 0.18f);   // tearout is centered/focused, not wide
         sweepFilter(bassBus, sr, spb, true, [&](double beat) {
             return std::max(20.0, double(score.buildFilter.sample(beat)) * 400.0);

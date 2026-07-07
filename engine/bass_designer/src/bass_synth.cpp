@@ -93,7 +93,7 @@ Recipe makeGrowlRecipe(float aggr, float dark, float nov, Rng& rng) {
     p["lfoShape"]     = float(rng.intRange(0, 5));
     p["lfoSteps"]     = float(rng.intRange(2, 8));
     // --- body filter ---
-    p["lpMul"]        = rng.rangef(5.0f, 9.0f) - dark * 1.5f;
+    p["lpMul"]        = rng.rangef(8.0f, 14.0f) - dark * 2.0f;   // bright scream body
     p["lpQ"]          = rng.rangef(0.7f, 1.4f);
     // --- output EQ / glue: HP keeps the SUB owning the lows; mid-focused chug ---
     // The tonal chug sits ~150 Hz-2 kHz; HP at 120-150 cedes everything below to
@@ -101,7 +101,7 @@ Recipe makeGrowlRecipe(float aggr, float dark, float nov, Rng& rng) {
     p["hpFreq"]       = rng.rangef(120.0f, 150.0f);
     p["midGainDb"]    = rng.rangef(3.0f, 6.0f) + aggr * 1.5f;
     p["midFreq"]      = rng.rangef(700.0f, 1400.0f);          // mid-focused chug body
-    p["highShelfDb"]  = 2.0f - dark * 7.0f;
+    p["highShelfDb"]  = 4.5f - dark * 3.0f;   // air/presence on the growl top
     p["ottAmt"]       = rng.rangef(0.1f, 0.3f);
     // --- movement polish: phaser DISABLED (static chug) ---
     p["phaserRate"]   = rng.rangef(0.2f, 1.0f);
@@ -110,8 +110,8 @@ Recipe makeGrowlRecipe(float aggr, float dark, float nov, Rng& rng) {
     // --- PUNCHY STAB amp env: fast attack, SHORT decay to a low tail, short release.
     // Each note is a percussive chug that DIES QUICKLY (not a sustained wub).
     p["ampAtk"]       = clampf(0.002f - aggr * 0.0012f + rng.rangef(-0.0003f, 0.0008f), 0.0006f, 0.004f);
-    p["ampDec"]       = rng.rangef(0.035f, 0.075f);           // short percussive decay
-    p["ampSus"]       = clampf(0.10f - aggr * 0.05f + rng.rangef(-0.02f, 0.04f), 0.0f, 0.18f); // low tail
+    p["ampDec"]       = rng.rangef(0.06f, 0.13f);             // a bit longer: body, not just a click
+    p["ampSus"]       = clampf(0.28f + aggr * 0.06f + rng.rangef(-0.03f, 0.05f), 0.15f, 0.42f); // sustained bright body so the scream carries mid RMS, still dies within the note (chug)
     p["ampRel"]       = rng.rangef(0.01f, 0.03f);
     p["gain"]         = 0.62f;
     // --- wavefolder: MODERATE, keeps the square tonal (odd-dominant), not a scream ---
@@ -142,8 +142,8 @@ Recipe makeGrowlRecipe(float aggr, float dark, float nov, Rng& rng) {
             // BRIGHTNESS: map the growl-band centroid (~1900 Hz neutral for a
             // real growl) to a gentle nudge of the body filter + high shelf.
             float bright = clampf((fp.growlCentroidHz - 1900.0f) / 1800.0f, -1.0f, 1.0f);
-            p["lpMul"]       = clampf(p["lpMul"]       + bright * 1.5f, 2.0f, 8.0f);
-            p["highShelfDb"] = clampf(p["highShelfDb"] + bright * 3.0f, -6.0f, 4.0f);
+            p["lpMul"]       = clampf(p["lpMul"]       + bright * 2.5f, 4.0f, 18.0f);
+            p["highShelfDb"] = clampf(p["highShelfDb"] + bright * 3.0f, -3.0f, 6.0f);
             // WOBBLE: snap the gate division to the reference wobble rate (145 BPM
             // quarter = 2.42 Hz) and make the wub pronounced.
             if (fp.growlWobbleHz > 0.5f) {
@@ -302,7 +302,10 @@ StereoBuffer renderGrowl(const Recipe& rc, const Voice& v) {
     // Body lowpass floor: for a low growl fundamental, freq*lpMul lands the body
     // path entirely in the mud (120-500 Hz). Floor it so the body carries real
     // mid harmonics up into the presence lane.
-    const double baseCut = std::max(freq * double(lpMul), 480.0);
+    // Floor high so the body path passes the SCREAM harmonics (1.5-5 kHz) that
+    // give a riddim growl its mid presence — reference growls carry 5-14% of
+    // energy in 800-2500 Hz; a 480 Hz floor buried the growl at ~1% (dull thud).
+    const double baseCut = std::max(freq * double(lpMul), 2400.0);
     const size_t gateN = size_t(std::llround(v.gateSec * sr));
     int coefCtr = 0;
     float lval = 0.0f;
@@ -590,19 +593,21 @@ Recipe makeSubRecipe(float aggr, float dark, float nov, Rng& rng) {
     // BOOMING CHUG sub: sine fundamental + a little harmonic weight, driven /
     // saturated for grit and body, kept in the sub band, hitting punchy WITH the
     // square mid chug. Mono, mostly <120 Hz. Drive scales with aggr.
-    p["h2"]        = rng.rangef(0.08f, 0.18f);                     // more weight than a pure sine
-    p["h3"]        = rng.rangef(0.04f, 0.12f) * (1.0f - dark * 0.4f);
-    p["drive"]     = 1.3f + aggr * 1.6f + rng.rangef(-0.1f, 0.2f); // aggressive saturation, scales w/ aggr
-    p["pitchStart"]= 0.0f;                                         // NO pitch blip — a sustained boom, not a kick-thump
+    p["h2"]        = rng.rangef(0.16f, 0.28f);                     // distorted booming sub: real harmonic weight, not a pure sine
+    p["h3"]        = rng.rangef(0.08f, 0.16f) * (1.0f - dark * 0.4f);
+    p["drive"]     = 1.6f + aggr * 2.0f + rng.rangef(-0.1f, 0.2f); // aggressive saturation, scales w/ aggr
+    p["pitchStart"]= 0.0f;                                         // NO pitch blip — a boom, not a kick-thump
     p["pitchDecay"]= rng.rangef(0.02f, 0.05f);
-    p["lpFreq"]    = rng.rangef(110.0f, 150.0f);                   // contain distortion in the sub band
-    // SUSTAINED BOOM (not a percussive transient): soft attack (no click), high
-    // sustain + long release so the sub RINGS as a booming tone under the chug
-    // and the kick drum carves the transient — the low end pumps, not a wall.
+    p["lpFreq"]    = rng.rangef(180.0f, 240.0f);                   // let 2nd/3rd harmonics spread into 60-120 (mix crossover keeps <120)
+    // BOOM WITH A GAP: soft attack (no click), MODERATE sustain + fairly fast
+    // release so the sub decays between hits and the deep kick sidechain can
+    // pump it to near-silence — a sustained-to-0.9 wall can't pump (it just
+    // swells straight back and fills the gap). The pumping references (ETERNAL
+    // 0.97, BULLETS 0.93) all have subs that duck to near-zero.
     p["ampAtk"]    = rng.rangef(0.008f, 0.016f);                   // soft — no kick-like click
-    p["ampDec"]    = rng.rangef(0.06f, 0.12f);
-    p["ampSus"]    = rng.rangef(0.82f, 0.94f);                     // booming ringing body
-    p["ampRel"]    = rng.rangef(0.05f, 0.12f);                     // rings out between hits
+    p["ampDec"]    = rng.rangef(0.05f, 0.10f);
+    p["ampSus"]    = rng.rangef(0.38f, 0.52f);                     // decays between hits -> pumps, not a wall
+    p["ampRel"]    = rng.rangef(0.04f, 0.09f);                     // rings out shorter between hits
     p["gain"]      = 0.72f;
     return r;
 }
