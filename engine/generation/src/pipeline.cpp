@@ -63,7 +63,8 @@ RatedSound synthesizeBest(Role role, const PaletteSpec& pal, const Plan& plan,
 std::optional<GenerationResult> generateTrack(const Params& params,
                                               SoundLibrary& library,
                                               const std::atomic<bool>& cancelFlag,
-                                              const ProgressFn& progress) {
+                                              const ProgressFn& progress,
+                                              bool ingest) {
     const auto t0 = std::chrono::steady_clock::now();
     const double sr = kSampleRate;
     auto report = [&](float f, const std::string& s) { if (progress) progress(f, s); };
@@ -131,7 +132,7 @@ std::optional<GenerationResult> generateTrack(const Params& params,
         if (goFresh) {
             const RatedSound* parent = picks.empty() ? nullptr : &picks.front();
             RatedSound best = synthesizeBest(role, pal, plan, parent, soundRng, sr, prefsPtr);
-            bool ingested = library.maybeIngest(best);
+            bool ingested = ingest ? library.maybeIngest(best) : false;
             if (ingested) ++newIngested;
             laneRecipe[li] = best.recipe;
             laneActive[li] = true;
@@ -142,7 +143,7 @@ std::optional<GenerationResult> generateTrack(const Params& params,
             const RatedSound& chosen = picks.front();
             laneRecipe[li] = chosen.recipe;
             laneActive[li] = true;
-            library.noteUsed(chosen.id);
+            if (ingest) library.noteUsed(chosen.id);
             usedLibIds.push_back(chosen.id);
             UsedSound us; us.lane = lane; us.libraryId = chosen.id; us.name = chosen.recipe.name;
             usedSounds.push_back(us);

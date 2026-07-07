@@ -48,9 +48,13 @@ using ProgressFn = std::function<void(float progress01, const std::string& stage
 /// contents). Returns nullopt only if cancelled. Synthesized sounds that
 /// rate above the admission threshold are ingested into `library` as a side
 /// effect (doc 05 §4). Safe to call from a worker thread.
+/// `ingest` (default true): admit synthesized sounds into `library` and update
+/// usage counts. Pass false for read-only renders (e.g. A/B previews) so the
+/// library snapshot is unchanged and the render is exactly reproducible.
 std::optional<GenerationResult> generateTrack(const Params& params,
                                               SoundLibrary& library,
                                               const std::atomic<bool>& cancelFlag,
-                                              const ProgressFn& progress);
+                                              const ProgressFn& progress,
+                                              bool ingest = true);
 
 } // namespace rtg
