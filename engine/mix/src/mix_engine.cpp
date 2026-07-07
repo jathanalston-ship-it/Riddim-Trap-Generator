@@ -308,8 +308,11 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
         // inaudible in the sum. Strong upward multiband compression lifts the
         // growl's sustained harmonics into a dense, present WALL so the mid/
         // presence lane the references sit in (5-14%) actually reads.
-        ottLite(bassBus, sr, 120.0, 2500.0, 0.45 + 0.30 * plan.mixAggression);
-        applyWidth(bassBus, 0.18f);   // tearout is centered/focused, not wide
+        ottLite(bassBus, sr, 120.0, 2500.0, 0.34 + 0.22 * plan.mixAggression);  // lighter: let transients punch (crest was ~3.5)
+        applyWidth(bassBus, 0.28f);   // moderate spread (source growl now carries real stereo)
+        stereoWiden(bassBus, sr, 0.85f, 220.0f); // mono-safe decorrelation: the distorted growl
+                                                 // correlates the channels toward mono; inject
+                                                 // decorrelated side >220 Hz to open the image
         sweepFilter(bassBus, sr, spb, true, [&](double beat) {
             return std::max(20.0, double(score.buildFilter.sample(beat)) * 400.0);
         });
@@ -351,13 +354,14 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
         if (!has(hl)) continue;
         StereoBuffer b = laneBuf(hl);
         applyStereo(makeHighpass(sr, 300.0), b);
-        applyWidth(b, 0.5f);
+        applyWidth(b, 0.7f);                          // wider hats for a stereo top
         addToDrums(b);
         addSend(b, hl);
     }
     if (has(Lane::Perc)) {
         StereoBuffer b = laneBuf(Lane::Perc);
         applyStereo(makeHighpass(sr, 300.0), b);
+        applyWidth(b, 0.6f);                          // shaker/perc spread (was mono)
         addToDrums(b);
         addSend(b, Lane::Perc);
     }
@@ -457,7 +461,7 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
     // Odd-harmonic soft clip: tightens the kick's low-end sustain and caps the
     // snare transient so the bus reads punchy (tighter kick + controlled snare)
     // instead of splatty. Raises loudness/punch without a brickwall limiter.
-    clipDrive(drumBus, 1.2 + 1.0 * plan.mixAggression, 0.98f);
+    clipDrive(drumBus, 1.1 + 0.7 * plan.mixAggression, 0.98f);   // lighter drum clip -> punchier transients
 
     // --- Sum buses ---------------------------------------------------------
     for (size_t i = 0; i < N; ++i) {

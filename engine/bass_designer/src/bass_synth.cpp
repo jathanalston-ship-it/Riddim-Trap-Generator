@@ -106,7 +106,7 @@ Recipe makeGrowlRecipe(float aggr, float dark, float nov, Rng& rng) {
     // --- movement polish: phaser DISABLED (static chug) ---
     p["phaserRate"]   = rng.rangef(0.2f, 1.0f);
     p["phaserMix"]    = 0.0f;
-    p["width"]        = 0.05f + nov * 0.12f;
+    p["width"]        = 0.32f + nov * 0.16f;   // real stereo spread (growl was near-mono -> collapsed the whole mix to mono)
     // --- PUNCHY STAB amp env: fast attack, SHORT decay to a low tail, short release.
     // Each note is a percussive chug that DIES QUICKLY (not a sustained wub).
     p["ampAtk"]       = clampf(0.002f - aggr * 0.0012f + rng.rangef(-0.0003f, 0.0008f), 0.0006f, 0.004f);

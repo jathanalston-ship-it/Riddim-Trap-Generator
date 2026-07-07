@@ -287,6 +287,32 @@ struct Allpass {
     }
 };
 
+// Mono-safe stereo widener: derives NEW side content from the mid via all-pass
+// phase-scrambling (a decorrelated copy), high-passed so the lows stay mono and
+// punchy. Because it is injected as pure side (L += x, R -= x), it cancels
+// completely in a mono sum — fully mono-compatible — while opening the image.
+// Fixes near-mono sources (e.g. a heavily distorted, channel-correlated growl).
+inline void stereoWiden(StereoBuffer& buf, double fs, float amount, float hpHz = 200.0f) {
+    const size_t n = buf.size();
+    if (n == 0 || amount <= 0.0f) return;
+    const double k = fs / 44100.0;
+    Allpass a0, a1, a2;
+    a0.init(std::max<size_t>(1, size_t(142 * k)), 0.60f);
+    a1.init(std::max<size_t>(1, size_t(379 * k)), 0.55f);
+    a2.init(std::max<size_t>(1, size_t(277 * k)), 0.50f);
+    const float hpC = std::exp(-2.0f * 3.14159265f * hpHz / float(fs));
+    float hpPrev = 0.0f, hpY = 0.0f;
+    for (size_t i = 0; i < n; ++i) {
+        const float mid = 0.5f * (buf.l[i] + buf.r[i]);
+        const float side = 0.5f * (buf.l[i] - buf.r[i]);
+        float dec = a2.process(a1.process(a0.process(mid)));
+        hpY = hpC * (hpY + dec - hpPrev); hpPrev = dec;   // one-pole HP on the decorrelated copy
+        const float extra = amount * hpY;
+        buf.l[i] = mid + side + extra;
+        buf.r[i] = mid - side - extra;
+    }
+}
+
 struct Diffuser {
     Comb c0, c1, c2; Allpass a0, a1;
     void init(double fs) {
