@@ -199,11 +199,20 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
     // pump). Depths scale with plan.sidechainDepth. Deterministic: purely a
     // function of the note lists, combined by per-sample minimum (deepest wins).
     const double scRelSec = spb * 0.15;                          // ~0.15 beat, punchy
-    const float snareMin = dbToGain(-4.5f * plan.sidechainDepth);
+    // Riddim tearout is built on a DEEP low-end pump: the sub/bass duck to
+    // near-silence on the kick then swell back in the gap (that "breathing" is
+    // the defining low end). The shared depth (0.45 for riddim) only dips the
+    // bass chain to ~-3 dB — a flat wall on the sub-envelope compare. Force a
+    // deep effective depth + a hard kick duck for the bass chain here; the
+    // gentler pad/reverb kickMin above is unchanged.
+    const bool riddim = plan.params.genre == Genre::Riddim;
+    const float pumpDepth = riddim ? std::max(plan.sidechainDepth, 0.9f) : plan.sidechainDepth;
+    const float bassKickMin = dbToGain((riddim ? -20.0f : -7.0f) * pumpDepth);
+    const float snareMin = dbToGain((riddim ? -12.0f : -4.5f) * pumpDepth);
     const float hatMin   = dbToGain(-1.5f * plan.sidechainDepth);
     const float percMin  = dbToGain(-2.0f * plan.sidechainDepth);
     std::vector<float> bassChainDuck =
-        buildDuckEnv(score.notes(Lane::Kick), N, spb, sr, 2.0, 10.0, scRelSec, kickMin);
+        buildDuckEnv(score.notes(Lane::Kick), N, spb, sr, 2.0, 10.0, scRelSec, bassKickMin);
     auto mergeDuck = [&](const std::vector<float>& d) {
         for (size_t i = 0; i < N; ++i) if (d[i] < bassChainDuck[i]) bassChainDuck[i] = d[i];
     };
