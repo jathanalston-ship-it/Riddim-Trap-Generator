@@ -452,26 +452,26 @@ void Comp::addSubFollow(const Section& s, int skipFirstBar) {
     const double agg = double(plan.aggression01);
 
     if (s.type == SectionType::Drop) {
-        // CHUG: mirror every BassA stab (placed just before this call) onto the
-        // Sub — same time, root fundamental, short & punchy. Deterministic (no
-        // RNG; a 1:1 mirror), so the sub boom always coincides with the square
-        // chug and the drums. Read only this section's bars.
-        const double lo = base + skipFirstBar * BPB;
-        const double hi = base + s.bars * BPB;
-        std::vector<std::pair<double, double>> stabs; // (startBeat, lengthBeats)
-        for (const Note& n : score.notes(Lane::BassA))
-            if (n.startBeat >= lo - 1e-6 && n.startBeat < hi - 1e-6)
-                stabs.emplace_back(n.startBeat, n.lengthBeats);
-        for (const auto& st : stabs) {
-            // Punchy: shrink with aggression, but never overrun the BassA stab.
-            const double slen = std::max(0.12, std::min(st.second, 0.42 - 0.14 * agg));
-            // Accent by beat position (downbeat boom loudest, off-beats punchy).
-            const double inBar = (st.first - base)
-                                 - std::floor((st.first - base) / BPB) * BPB;
-            const bool onBeat = std::abs(inBar - std::round(inBar)) < 1e-6;
-            const bool beatOne = inBar < 1e-6;
-            const float v = beatOne ? 0.98f : (onBeat ? 0.90f : 0.82f);
-            add(Lane::Sub, st.first, slen, rootSub, v, 0.15f);
+        // BOOMING SUSTAINED sub: re-hit on each BEAT (half-beat at high
+        // aggression) with LONG ringing notes so it's a booming TONE that rings
+        // under the chug — NOT a percussive thump on every 16th (that read as a
+        // "kick on every beat"). The square MID chug carries the fast rhythm;
+        // the sub + kick own the low pulse, and the mix ducks the sub to the
+        // kick so the low end PUMPS. Deterministic (no RNG).
+        const int subDiv = (agg > 0.6) ? 2 : 1;      // per-beat, or per-half-beat when hard
+        const double stepB = 1.0 / double(subDiv);
+        const double slen = stepB * 0.94;            // rings almost to the next hit
+        for (int b = 0; b < s.bars; ++b) {
+            if (b < skipFirstBar) continue;
+            const int hits = int(BPB) * subDiv;      // 4 or 8 per bar
+            for (int k = 0; k < hits; ++k) {
+                const double t = base + b * BPB + k * stepB;
+                const double inBeat = k * stepB - std::floor(k * stepB);
+                const bool onBeat = inBeat < 1e-6;
+                const bool downbeat = (k == 0);
+                const float v = downbeat ? 0.98f : (onBeat ? 0.9f : 0.8f);
+                add(Lane::Sub, t, slen, rootSub, v, 0.12f);
+            }
         }
         return;
     }
@@ -505,12 +505,13 @@ void Comp::addDrums(const Section& s, Rng& r, float density, bool withSnare,
             // Busier than before — near-constant whacks at high aggression.
             if (s.type == SectionType::Drop) {
                 const double agg = double(plan.aggression01);
-                if (r.chance(0.70 + 0.28 * agg)) {
-                    add(Lane::Kick, bb + 1.0, 0.26, rootSub, hvel(r, 0.60f, 0.04f));
-                    add(Lane::Kick, bb + 3.0, 0.26, rootSub, hvel(r, 0.58f, 0.04f));
+                // Kick anchors beat 1; the snare owns beat 3 (half-time). Only a
+                // SUBTLE "whack" ghost on 2 & 4 (felt, not heard as a kick) so the
+                // low end does NOT read as "kick on every beat".
+                if (r.chance(0.4 + 0.25 * agg)) {
+                    add(Lane::Kick, bb + 1.0, 0.18, rootSub, hvel(r, 0.30f, 0.03f));
+                    add(Lane::Kick, bb + 3.0, 0.18, rootSub, hvel(r, 0.28f, 0.03f));
                 }
-                if (r.chance(0.50 + 0.40 * agg))
-                    add(Lane::Kick, bb + 2.0, 0.26, rootSub, hvel(r, 0.66f, 0.04f));
                 if (r.chance(0.35 + 0.30 * double(density)))
                     add(Lane::Perc, bb + 2.5, 0.16, 37, hvel(r, 0.42f, 0.05f), 0.5f);
             }

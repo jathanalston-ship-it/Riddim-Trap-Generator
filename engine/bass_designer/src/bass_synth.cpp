@@ -593,14 +593,16 @@ Recipe makeSubRecipe(float aggr, float dark, float nov, Rng& rng) {
     p["h2"]        = rng.rangef(0.08f, 0.18f);                     // more weight than a pure sine
     p["h3"]        = rng.rangef(0.04f, 0.12f) * (1.0f - dark * 0.4f);
     p["drive"]     = 1.3f + aggr * 1.6f + rng.rangef(-0.1f, 0.2f); // aggressive saturation, scales w/ aggr
-    p["pitchStart"]= rng.rangef(0.0f, 1.5f);                       // short pitch blip (semitones), adds boom
-    p["pitchDecay"]= rng.rangef(0.015f, 0.04f);                    // fast blip decay
+    p["pitchStart"]= 0.0f;                                         // NO pitch blip — a sustained boom, not a kick-thump
+    p["pitchDecay"]= rng.rangef(0.02f, 0.05f);
     p["lpFreq"]    = rng.rangef(110.0f, 150.0f);                   // contain distortion in the sub band
-    // punchy env with body/boom: fast attack, short punch decay, solid sustained body.
-    p["ampAtk"]    = rng.rangef(0.0015f, 0.004f);
-    p["ampDec"]    = rng.rangef(0.04f, 0.09f);
-    p["ampSus"]    = rng.rangef(0.65f, 0.82f);                     // booming body under the chug
-    p["ampRel"]    = rng.rangef(0.02f, 0.05f);
+    // SUSTAINED BOOM (not a percussive transient): soft attack (no click), high
+    // sustain + long release so the sub RINGS as a booming tone under the chug
+    // and the kick drum carves the transient — the low end pumps, not a wall.
+    p["ampAtk"]    = rng.rangef(0.008f, 0.016f);                   // soft — no kick-like click
+    p["ampDec"]    = rng.rangef(0.06f, 0.12f);
+    p["ampSus"]    = rng.rangef(0.82f, 0.94f);                     // booming ringing body
+    p["ampRel"]    = rng.rangef(0.05f, 0.12f);                     // rings out between hits
     p["gain"]      = 0.72f;
     return r;
 }
