@@ -8,3 +8,7 @@ third_party/
 CMakeUserPresets.json
 rtg_library/
 calibration.json
+
+# Python bytecode from the earview/analysis dev tools
+__pycache__/
+*.pyc
