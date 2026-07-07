@@ -248,6 +248,82 @@ void Comp::addBass(const Section& s, Rng& r, int skipFirstBar) {
     const bool tearout = (s.type == SectionType::Drop);
     const double agg = double(plan.aggression01);
 
+    // ---- CHUG (riddim DROP): the signature interlock. BassA plays short
+    // square-wave STAB "chugs" on a STRAIGHT-EIGHTH grid, LOCKED to the beat/
+    // half-beat with the kick / snare / whack-kicks + the Sub (which mirrors
+    // these exact stabs in addSubFollow). The four beats (slots 0/2/4/6) ALWAYS
+    // chug; the off-beat eighths (1/3/5/7) fill in as aggression/complexity rise
+    // → busier but always tight and on-grid. Mostly ROOT (tonal chug); rare
+    // octave / dark scale move for movement. No swing, no triplet — a
+    // machine-square "chug chug chug" that coincides with every drum hit.
+    // Handled entirely here (dedicated path) so the classic call/response riddim
+    // below — used by non-drop riddim sections — keeps its exact RNG draw order.
+    if (tearout) {
+        for (int b = 0; b < bars; ++b) {
+            if (b < skipFirstBar) continue;
+
+            // 8 straight eighths per bar. On-beats always chug; off-beats fill.
+            bool hit[8];
+            for (int e = 0; e < 8; ++e) {
+                if ((e % 2) == 0) { hit[e] = true; continue; } // on-beat: locked
+                const double p = 0.35 + 0.50 * agg + 0.15 * plan.complexity01;
+                hit[e] = r.chance(std::min(0.97, p));           // busier with aggr
+            }
+
+            // Precompute stab (slot,time) pairs so lengths clamp to the next
+            // onset — guarantees staccato, no overlapping starts within BassA.
+            std::vector<std::pair<int, double>> stabs;
+            for (int e = 0; e < 8; ++e)
+                if (hit[e]) stabs.emplace_back(e, base + b * BPB + e * 0.5);
+
+            int distinctCap = (plan.melody01 < 0.3f) ? 1 : 2; // melodic restraint
+            int distinctUsed = 0, lastOff = 0;
+
+            for (size_t si = 0; si < stabs.size(); ++si) {
+                const int e = stabs[si].first;
+                const double t = stabs[si].second;
+                const double nextT = (si + 1 < stabs.size())
+                                         ? stabs[si + 1].second
+                                         : base + (b + 1) * BPB;
+                // Short, punchy staccato — never overrun the next chug; tighter
+                // (shorter) as aggression rises.
+                const double maxLen = std::max(0.06, (nextT - t) * 0.9);
+                const double len = std::min(0.30 - 0.08 * agg, maxLen);
+
+                // PITCH: mostly ROOT; rare octave / dark scale move for variety.
+                int off = 0;
+                if (si != 0 && distinctUsed < distinctCap
+                    && r.chance(0.06 + 0.30 * plan.melody01 * plan.complexity01)) {
+                    static const int devs[]  = {12, -12, 10, 6, 3}; // 8va,-8va,b7,b5,b3
+                    static const double dw[]  = {1.7, 0.6, 0.8, 0.5, 0.6};
+                    std::vector<double> dvw(dw, dw + 5);
+                    off = devs[r.pickWeighted(dvw, 1.0)];
+                    if (off != lastOff) ++distinctUsed;
+                }
+                lastOff = off;
+
+                // ARTICULATION ("talk"): alternate per beat/off-beat so the growl
+                // moves; occasional sweep accent.
+                float artic = ((e & 2) == 0) ? 0.24f : 0.58f;
+                if (r.chance(0.12)) artic = 0.95f; // sweep accent
+                artic = std::min(1.0f, artic * (0.70f + 0.55f * pal.aggression01));
+
+                // Velocity: accent the downbeat, strong on beats, punchy off-beats.
+                float velBase = (e == 0) ? 0.98f : ((e % 2 == 0) ? 0.92f : 0.84f);
+                velBase = std::min(1.0f, velBase + 0.05f * float(agg));
+                add(Lane::BassA, t, len, bassPitch(off), hvel(r, velBase), artic);
+            }
+
+            // BassC: rare octave accent on an off-beat when a 3rd voice exists.
+            if (pal.bassVoices >= 3 && r.chance(0.22)) {
+                const int slot = r.chance(0.5) ? 3 : 5;
+                add(Lane::BassC, base + b * BPB + slot * 0.5, 0.20,
+                    bassPitch(12), hvel(r, 0.6f), 0.5f);
+            }
+        }
+        return;
+    }
+
     // TRIPLET feel: kept for classic riddim, but forced OFF on tearout unless
     // aggression is genuinely low AND chaos is high (a rare shuffled tearout).
     const bool triplet0 = r.chance(0.22 + 0.18 * plan.chaos01);
@@ -367,30 +443,45 @@ void Comp::addBass(const Section& s, Rng& r, int skipFirstBar) {
     }
 }
 
-// SUB lane: riddim only, follows bass downbeats simplified (root, long gate).
+// SUB lane: riddim only. On the DROP the Sub LAYERS THE CHUG — it hits the exact
+// same short stabs as BassA (the booming low octave under the mid square), so
+// drums and chug coincide. Elsewhere: root on the downbeat, held into the pocket.
 void Comp::addSubFollow(const Section& s, int skipFirstBar) {
     if (!riddim) return; // trap: 808 covers the sub, leave Sub empty
     const double base = s.startBar * BPB;
-    // Tearout: on hard riddim drops the Sub STOMPS in lockstep with the bass +
-    // kick — short, punchy mono-root hits on beats 1/2/3/4 instead of a long
-    // held root. Blended in by aggression; classic held sub below that.
-    const bool tearout = (s.type == SectionType::Drop) && (plan.aggression01 >= 0.5f);
     const double agg = double(plan.aggression01);
+
+    if (s.type == SectionType::Drop) {
+        // CHUG: mirror every BassA stab (placed just before this call) onto the
+        // Sub — same time, root fundamental, short & punchy. Deterministic (no
+        // RNG; a 1:1 mirror), so the sub boom always coincides with the square
+        // chug and the drums. Read only this section's bars.
+        const double lo = base + skipFirstBar * BPB;
+        const double hi = base + s.bars * BPB;
+        std::vector<std::pair<double, double>> stabs; // (startBeat, lengthBeats)
+        for (const Note& n : score.notes(Lane::BassA))
+            if (n.startBeat >= lo - 1e-6 && n.startBeat < hi - 1e-6)
+                stabs.emplace_back(n.startBeat, n.lengthBeats);
+        for (const auto& st : stabs) {
+            // Punchy: shrink with aggression, but never overrun the BassA stab.
+            const double slen = std::max(0.12, std::min(st.second, 0.42 - 0.14 * agg));
+            // Accent by beat position (downbeat boom loudest, off-beats punchy).
+            const double inBar = (st.first - base)
+                                 - std::floor((st.first - base) / BPB) * BPB;
+            const bool onBeat = std::abs(inBar - std::round(inBar)) < 1e-6;
+            const bool beatOne = inBar < 1e-6;
+            const float v = beatOne ? 0.98f : (onBeat ? 0.90f : 0.82f);
+            add(Lane::Sub, st.first, slen, rootSub, v, 0.15f);
+        }
+        return;
+    }
+
     for (int b = 0; b < s.bars; ++b) {
         if (b < skipFirstBar) continue;
-        if (tearout) {
-            // Length shrinks as aggression rises → tighter, more staccato stomp.
-            const double slen = 0.55 - 0.25 * agg; // ~0.30 (hard) .. 0.45
-            for (int beat = 0; beat < 4; ++beat) {
-                const float v = (beat == 0) ? 0.98f : (beat == 2 ? 0.90f : 0.82f);
-                add(Lane::Sub, base + b * BPB + beat, slen, rootSub, v, 0.15f);
-            }
-        } else {
-            // Root on the bar downbeat, held into the halftime pocket.
-            add(Lane::Sub, base + b * BPB, 1.5, rootSub, 0.95f, 0.2f);
-            // Occasional mid-bar sub reinforcement.
-            add(Lane::Sub, base + b * BPB + 2.0, 1.0, rootSub, 0.85f, 0.2f);
-        }
+        // Root on the bar downbeat, held into the halftime pocket.
+        add(Lane::Sub, base + b * BPB, 1.5, rootSub, 0.95f, 0.2f);
+        // Occasional mid-bar sub reinforcement.
+        add(Lane::Sub, base + b * BPB + 2.0, 1.0, rootSub, 0.85f, 0.2f);
     }
 }
 
@@ -407,15 +498,21 @@ void Comp::addDrums(const Section& s, Rng& r, float density, bool withSnare,
         // Kick.
         if (riddim) {
             add(Lane::Kick, bb + 0.0, 0.5, rootSub, hvel(r, 1.0f, 0.05f));
-            // TEAROUT "whack": on hard drops, lock quieter reinforcement kicks on
-            // beats 2 & 4 (offsets 1.0/3.0 — clear of the beat-3 snare) under the
-            // bass+sub quarter stomps. Frequency scales with aggression/density.
+            // CHUG interlock: on riddim drops the drums lock UNDER the chug so
+            // every beat/half-beat has a drum + a stab. Quieter "whack" kicks on
+            // beats 2 & 4 (offsets 1.0/3.0), a medium reinforcing kick under the
+            // beat-3 snare ("kick on 1 & 3"), and a ghost perc for groove.
+            // Busier than before — near-constant whacks at high aggression.
             if (s.type == SectionType::Drop) {
                 const double agg = double(plan.aggression01);
-                if (r.chance(0.45 + 0.5 * agg * double(density))) {
-                    add(Lane::Kick, bb + 1.0, 0.28, rootSub, hvel(r, 0.60f, 0.04f));
-                    add(Lane::Kick, bb + 3.0, 0.28, rootSub, hvel(r, 0.58f, 0.04f));
+                if (r.chance(0.70 + 0.28 * agg)) {
+                    add(Lane::Kick, bb + 1.0, 0.26, rootSub, hvel(r, 0.60f, 0.04f));
+                    add(Lane::Kick, bb + 3.0, 0.26, rootSub, hvel(r, 0.58f, 0.04f));
                 }
+                if (r.chance(0.50 + 0.40 * agg))
+                    add(Lane::Kick, bb + 2.0, 0.26, rootSub, hvel(r, 0.66f, 0.04f));
+                if (r.chance(0.35 + 0.30 * double(density)))
+                    add(Lane::Perc, bb + 2.5, 0.16, 37, hvel(r, 0.42f, 0.05f), 0.5f);
             }
             // Complexity-scaled pickup before the next bar.
             if (r.chance(0.25 * plan.complexity01 * density))
@@ -554,9 +651,9 @@ void Comp::addFill(int bar, Rng& r, float nextEnergy) {
 
     // Reverse-swell ear-candy: a short riser across the fill bar for an
     // uplifting sweep into whatever comes next (more likely for big energy).
-    if (r.chance(0.22 + 0.30 * nextEnergy))
+    if (r.chance((riddim ? 0.10 : 0.22) + (riddim ? 0.15 : 0.30) * nextEnergy))
         add(Lane::Riser, bb, BPB, plan.rootMidi + 34,
-            0.55f + 0.30f * nextEnergy, 0.85f);
+            (riddim ? 0.35f : 0.55f) + (riddim ? 0.20f : 0.30f) * nextEnergy, 0.85f);
 
     if (roll < 0.22 * (0.5 + plan.chaos01)) {
         // Cut fill: remove all drum notes in the LAST beat (silence gap).
@@ -594,8 +691,9 @@ void Comp::addFill(int bar, Rng& r, float nextEnergy) {
                 hvel(r, 0.5f, 0.05f), 0.3f);
         }
     } else {
-        // Reverse-swell / riser lift into the next section.
-        add(Lane::Riser, fillStart, 2.0, plan.rootMidi + 36, hvel(r, 0.7f, 0.04f), 0.8f);
+        // Reverse-swell / riser lift into the next section (subtler on riddim).
+        add(Lane::Riser, fillStart, 2.0, plan.rootMidi + 36,
+            hvel(r, riddim ? 0.5f : 0.7f, 0.04f), 0.8f);
         add(Lane::Perc, bb + 3.5, 0.2, 37, hvel(r, 0.5f, 0.05f), 0.5f);
     }
 
@@ -812,28 +910,31 @@ void Comp::addTransitions() {
         // Skip if a strong marker already sits on the boundary (drop entry,
         // build riser start, break downlifter, etc.) — just complement it.
         if (hasFxNear(bnd, 1.0)) {
-            // Add a subtle 1-beat pre-boundary swell as extra glue occasionally.
-            if (r.chance(0.35))
-                addSwell(bnd - 2.0, 2.0, 0.5f, dE >= 0.0f);
+            // Add a subtle 1-beat pre-boundary swell as extra glue occasionally
+            // (sparser + subtler on riddim to cut cheese).
+            if (r.chance(riddim ? 0.22 : 0.35))
+                addSwell(bnd - 2.0, 2.0, riddim ? 0.4f : 0.5f, dE >= 0.0f);
             continue;
         }
 
         if (dE > 0.1f) {
-            // Rising: reverse-riser swell + a soft impact landing.
-            addSwell(bnd - 2.0, 2.0, 0.6f + 0.25f * cur.energy, true);
+            // Rising: reverse-riser swell + a soft impact landing (impact kept).
+            addSwell(bnd - 2.0, 2.0,
+                     (riddim ? 0.45f : 0.6f) + (riddim ? 0.15f : 0.25f) * cur.energy, true);
             if (r.chance(0.6))
                 add(Lane::Impact, bnd, 0.8, rootSub, 0.8f, 1.0f);
         } else if (dE < -0.1f) {
-            // Falling: downlifter dive + crash wash on the downbeat.
-            add(Lane::Downlifter, bnd, 2.0, plan.rootMidi + 26, 0.75f, 0.8f);
-            if (r.chance(0.5))
-                add(Lane::Crash, bnd, 1.8, 49, 0.7f, 0.5f);
+            // Falling: downlifter dive + crash wash on the downbeat (subtler/
+            // sparser on riddim).
+            add(Lane::Downlifter, bnd, 2.0, plan.rootMidi + 26, riddim ? 0.55f : 0.75f, 0.8f);
+            if (r.chance(riddim ? 0.25 : 0.5))
+                add(Lane::Crash, bnd, 1.8, 49, riddim ? 0.45f : 0.7f, 0.5f);
         } else {
-            // Flat: a light crash or swell to mark the seam.
+            // Flat: a light crash or swell to mark the seam (subtler on riddim).
             if (r.chance(0.5))
-                add(Lane::Crash, bnd, 1.5, 49, 0.6f, 0.5f);
+                add(Lane::Crash, bnd, 1.5, 49, riddim ? 0.42f : 0.6f, 0.5f);
             else
-                addSwell(bnd - 2.0, 2.0, 0.5f, true);
+                addSwell(bnd - 2.0, 2.0, riddim ? 0.4f : 0.5f, true);
         }
     }
 }
@@ -1029,10 +1130,13 @@ void Comp::composeDrop(const Section& s, int idx, Rng& r) {
     }
 
     add(Lane::Impact, entry, 1.0, rootSub, 1.0f, 1.0f);
-    add(Lane::Crash, entry, 2.0, 49, 0.9f, 0.5f);
+    // Keep the impact punchy; the crash is kept SUBTLE on riddim (lower velocity)
+    // so the drop entry isn't cheesy — the chug + drums carry it.
+    add(Lane::Crash, entry, 2.0, 49, riddim ? 0.5f : 0.9f, 0.5f);
     // TRANSITION sweep: a short falling downlifter tail smoothing into the drop.
-    if (r.chance(0.5))
-        add(Lane::Downlifter, entry, 1.5, plan.rootMidi + 30, 0.7f, 0.8f);
+    // Sparser + subtler on riddim.
+    if (r.chance(riddim ? 0.22 : 0.5))
+        add(Lane::Downlifter, entry, 1.5, plan.rootMidi + 30, riddim ? 0.45f : 0.7f, 0.8f);
 
     // Full bass + drums. TEAROUT: tighten timing drift toward 0 as aggression
     // rises so the stomp stays LOCKED (bass stabs are already grid-exact; this
@@ -1053,10 +1157,10 @@ void Comp::composeDrop(const Section& s, int idx, Rng& r) {
     // Impact + crash again at the mid-drop switch, with a lead-in riser sweep.
     if (s.switchAt8 && s.bars > 16) {
         double sw = (s.startBar + 16) * BPB;
-        add(Lane::Crash, sw, 2.0, 49, 0.85f, 0.5f);
+        add(Lane::Crash, sw, 2.0, 49, riddim ? 0.5f : 0.85f, 0.5f);
         add(Lane::Impact, sw, 0.8, rootSub, 0.9f, 1.0f);
-        if (r.chance(0.5))
-            add(Lane::Riser, sw - BPB, BPB, plan.rootMidi + 38, 0.8f, 0.9f);
+        if (r.chance(riddim ? 0.22 : 0.5))
+            add(Lane::Riser, sw - BPB, BPB, plan.rootMidi + 38, riddim ? 0.5f : 0.8f, 0.9f);
     }
 
     // Fills at the end of every 8-bar phrase, plus a crash marking the new
@@ -1065,8 +1169,8 @@ void Comp::composeDrop(const Section& s, int idx, Rng& r) {
         float nextE = (idx + 1 < int(plan.sections.size()))
                           ? plan.sections[idx + 1].energy : 0.5f;
         addFill(s.startBar + b, r, nextE);
-        if (b + 1 < s.bars && r.chance(0.6))
-            add(Lane::Crash, (s.startBar + b + 1) * BPB, 1.5, 49, 0.8f, 0.5f);
+        if (b + 1 < s.bars && r.chance(riddim ? 0.3 : 0.6))
+            add(Lane::Crash, (s.startBar + b + 1) * BPB, 1.5, 49, riddim ? 0.5f : 0.8f, 0.5f);
     }
 
     // --- Post-pass ear-candy (drawn AFTER all drop content so the drop pattern

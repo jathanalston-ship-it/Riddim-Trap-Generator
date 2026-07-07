@@ -1,5 +1,5 @@
-// Autonomous Mix Engine (doc 07): gain staging, spectral-slotting EQ, kick->bass
-// sidechain ducking, bass-bus saturation + OTT-lite, stereo policy (mono <120 Hz),
+// Autonomous Mix Engine (doc 07): gain staging, spectral-slotting EQ, all-drum
+// sidechain ducking of the bass chain, bass-bus saturation + OTT-lite, stereo policy (mono <120 Hz),
 // section automation (buildFilter/breakSoften/fxSend), and -6 dBTP headroom.
 #include "rtg/mix/mix_engine.h"
 
@@ -191,6 +191,27 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
     std::vector<float> kickDuck = buildDuckEnv(score.notes(Lane::Kick), N, spb, sr, 2.0, 40.0, relSec, kickMin);
     std::vector<float> snareDuck = buildDuckEnv(score.notes(Lane::Snare), N, spb, sr, 2.0, 40.0, relSec, dbToGain(-2.0f));
 
+    // --- Bass-chain sidechain: duck the WHOLE bass chain (sub + bass buses)
+    // to ALL drum onsets so each hit pierces cleanly and the chug "breathes"
+    // with the groove. Fast attack (~2 ms), short hold, fast release (~0.15
+    // beat) so the bass springs straight back between hits. Kick ducks deepest,
+    // snare a touch less, hats/perc are LIGHT (they're quiet — clarity, not a
+    // pump). Depths scale with plan.sidechainDepth. Deterministic: purely a
+    // function of the note lists, combined by per-sample minimum (deepest wins).
+    const double scRelSec = spb * 0.15;                          // ~0.15 beat, punchy
+    const float snareMin = dbToGain(-4.5f * plan.sidechainDepth);
+    const float hatMin   = dbToGain(-1.5f * plan.sidechainDepth);
+    const float percMin  = dbToGain(-2.0f * plan.sidechainDepth);
+    std::vector<float> bassChainDuck =
+        buildDuckEnv(score.notes(Lane::Kick), N, spb, sr, 2.0, 10.0, scRelSec, kickMin);
+    auto mergeDuck = [&](const std::vector<float>& d) {
+        for (size_t i = 0; i < N; ++i) if (d[i] < bassChainDuck[i]) bassChainDuck[i] = d[i];
+    };
+    mergeDuck(buildDuckEnv(score.notes(Lane::Snare),     N, spb, sr, 2.0, 8.0, scRelSec,        snareMin));
+    mergeDuck(buildDuckEnv(score.notes(Lane::HatClosed), N, spb, sr, 2.0, 3.0, scRelSec * 0.7f, hatMin));
+    mergeDuck(buildDuckEnv(score.notes(Lane::HatOpen),   N, spb, sr, 2.0, 3.0, scRelSec * 0.7f, hatMin));
+    mergeDuck(buildDuckEnv(score.notes(Lane::Perc),      N, spb, sr, 2.0, 5.0, scRelSec,        percMin));
+
     StereoBuffer mix(N);
 
     // --- Depth send accumulators -------------------------------------------
@@ -226,9 +247,9 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
     if (has(Lane::Sub)) {
         subBus = laneBuf(Lane::Sub);
         forceMono(subBus);                        // sub forced mono
-        applyStereo(makeLowpass(sr, 110.0), subBus);
+        applyStereo(makeLowpass(sr, 120.0), subBus);  // sub OWNS <120 Hz (clean crossover)
         applyStereo(makeHighpass(sr, 25.0), subBus);
-        applyEnv(subBus, kickDuck);
+        applyEnv(subBus, bassChainDuck);          // whole bass chain ducks to ALL drums
     }
 
     // --- BASS bus (sum voices -> saturation -> OTT-lite -> width) ----------
@@ -238,8 +259,8 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
         if (!has(bl)) continue;
         anyBass = true;
         StereoBuffer b = laneBuf(bl);
-        applyStereo(makeHighpass(sr, 95.0), b);   // never fight the sub
-        applyEnv(b, kickDuck);
+        applyStereo(makeHighpass(sr, 120.0), b);  // bass OWNS 120 Hz-2 kHz; clean crossover, sub keeps <120
+        applyEnv(b, bassChainDuck);               // whole bass chain ducks to ALL drums
         for (size_t i = 0; i < N; ++i) { bassBus.l[i] += b.l[i]; bassBus.r[i] += b.r[i]; }
     }
     if (anyBass) {

@@ -30,7 +30,7 @@ Recipe makeRiserRecipe(float aggr, float dark, float nov, Rng& rng) {
     p["lpEnd"]    = rng.rangef(6000.0f, 12000.0f) - dark * 3000.0f;
     p["noiseMix"] = rng.rangef(0.4f, 0.7f);
     p["widthEnd"] = 0.9f;
-    p["gain"]     = 0.5f;
+    p["gain"]     = 0.36f;   // subtler transition sweep (less cheesy)
     return r;
 }
 
@@ -115,7 +115,7 @@ Recipe makeDownlifterRecipe(float aggr, float dark, float nov, Rng& rng) {
     p["lpStart"]  = rng.rangef(6000.0f, 11000.0f) - dark * 3000.0f;
     p["lpEnd"]    = rng.rangef(300.0f, 700.0f);
     p["noiseMix"] = rng.rangef(0.4f, 0.7f);
-    p["gain"]     = 0.5f;
+    p["gain"]     = 0.36f;   // subtler transition sweep (less cheesy)
     return r;
 }
 

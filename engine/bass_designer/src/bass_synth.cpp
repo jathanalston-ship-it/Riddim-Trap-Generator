@@ -32,88 +32,98 @@ Recipe makeGrowlRecipe(float aggr, float dark, float nov, Rng& rng) {
     Recipe r; r.role = Role::Growl; r.seed = rng.next();
     r.name = hexName("growl", rng);
     auto& p = r.p;
-    // --- rich source ---
+    // === HARD-RIDDIM CHUG ==================================================
+    // A chug is a SHORT, PUNCHY, TONAL square-wave STAB — not a wobbling/talking
+    // growl. The rhythm ("chug-chug-chug") comes from the NOTE PATTERN the
+    // composer places (short stabs on the beat/half-beat), NOT from an LFO gate
+    // chopping a sustain. So: square-dominant source, fast attack + short decay,
+    // aggression from serial distortion (tanh + moderate fold/dirty) kept TONAL
+    // and odd-harmonic, and the wub/talk/comb/phaser stages disabled.
+    // --- square-dominant source (the tonal mid chug) ---
     static const float ratios[] = {0.5f, 1.0f, 1.5f, 2.0f, 3.0f};
     p["carrierRatio"] = ratios[rng.intRange(0, 4)];
-    p["fmIndex"]      = 2.0f + aggr * 8.0f + rng.rangef(-1.0f, 1.0f) * (1.0f + nov * 2.5f);
-    p["fmDecay"]      = rng.rangef(0.05f, 0.16f);
-    p["fmFeedback"]   = rng.rangef(0.0f, 0.5f) * (0.5f + aggr);
-    p["carMix"]       = rng.rangef(0.10f, 0.28f);   // keep LOW: analog square LEADS the FM sine
-    p["srcMorph"]     = clampf(0.5f + rng.rangef(-0.06f, 0.06f), 0.4f, 0.6f); // lock to square center
-    p["pulseWidth"]   = rng.rangef(0.2f, 0.5f);
-    p["pmAmt"]        = rng.rangef(0.15f, 0.5f) * (0.7f + aggr * 1.4f); // FM->square: metallic bite, scales w/ aggr
-    p["pwmRate"]      = rng.rangef(0.15f, 0.8f);    // slow pulse-width movement
-    p["pwmDepth"]     = rng.rangef(0.05f, 0.2f);
-    p["unison"]       = float(rng.intRange(1, 3));
-    p["detuneCents"]  = rng.rangef(6.0f, 20.0f);
-    // --- bitcrush / sample-rate-reduction grit (robotic "talk") ---
-    p["gritRate"]     = rng.rangef(3000.0f, 14000.0f);
-    p["gritBits"]     = rng.rangef(6.0f, 12.0f);
-    p["gritMix"]      = clampf(rng.rangef(0.25f, 0.7f) * (0.5f + aggr), 0.0f, 1.0f);
-    // --- tempo-synced amplitude gate (the "wub") ---
-    // Tearout STOMP gate: bias straight EIGHTHS (gateDiv=2 ~= 4.8 Hz at 145 BPM,
-    // the hard "wob-wob" stomp), NOT frantic 16ths — deep, square-dominant.
-    static const float gateDivs[] = {2.0f, 3.0f, 4.0f, 6.0f}; // 8ths / 8th-trips / 16ths / sextuplets
+    p["fmIndex"]      = 1.5f + aggr * 3.5f + rng.rangef(-0.5f, 0.5f) * (0.5f + nov * 1.0f); // modest bite, not a scream
+    p["fmDecay"]      = rng.rangef(0.02f, 0.06f);   // short: FM bite only on the transient
+    p["fmFeedback"]   = rng.rangef(0.0f, 0.25f) * (0.4f + aggr * 0.6f);
+    p["carMix"]       = rng.rangef(0.08f, 0.18f);   // keep LOW: analog SQUARE LEADS the FM sine
+    p["srcMorph"]     = clampf(0.5f + rng.rangef(-0.05f, 0.05f), 0.42f, 0.58f); // lock to square center
+    p["pulseWidth"]   = rng.rangef(0.35f, 0.5f);
+    p["pmAmt"]        = rng.rangef(0.08f, 0.22f) * (0.6f + aggr * 0.8f); // light metallic bite, scales w/ aggr
+    p["pwmRate"]      = rng.rangef(0.0f, 0.2f);     // near-static width (no wub movement)
+    p["pwmDepth"]     = rng.rangef(0.0f, 0.04f);    // ~static per hit
+    p["unison"]       = float(rng.intRange(1, 2));
+    p["detuneCents"]  = rng.rangef(4.0f, 12.0f);
+    // --- grit: minimal (the robotic "talk" is stripped; keep only a touch of edge) ---
+    p["gritRate"]     = rng.rangef(6000.0f, 16000.0f);
+    p["gritBits"]     = rng.rangef(9.0f, 14.0f);
+    p["gritMix"]      = clampf(rng.rangef(0.0f, 0.12f) * (0.4f + aggr * 0.6f), 0.0f, 0.25f);
+    // --- tempo-synced amplitude gate: STRIPPED (gateDepth -> 0, no wub) ---
+    // gateDiv/gateShape are still drawn/retained so the calibration block below
+    // and legacy recipes stay well-formed, but renderGrowl no longer applies the
+    // gate: the chug rhythm comes from the note pattern, not this LFO.
+    static const float gateDivs[] = {2.0f, 3.0f, 4.0f, 6.0f};
     int   gdAlt       = rng.intRange(0, 3);                    // drawn unconditionally (determinism)
-    p["gateDiv"]      = (rng.uniform() < 0.7f) ? 2.0f : gateDivs[gdAlt];  // bias eighth-note stomp
-    p["gateDepth"]    = clampf(0.72f + aggr * 0.2f + rng.rangef(0.0f, 0.08f), 0.45f, 0.95f); // deep stomp
-    p["gateShape"]    = (rng.uniform() < 0.85f) ? 4.0f : 5.0f; // 4 square (hard stomp), 5 stepped S&H
-    // --- distortion staging ---
-    // Serial stacked distortion is the CORE of tearout: pre-tanh -> post tanh/fold
-    // blend (wsMix, high) -> wavefold (foldMix, heavy) -> 2nd "dirty" tanh
-    // (dirtyDrive/dirtyMix). All bounded/normalised so it stays gnarly, not louder.
-    p["drivePre"]     = 1.8f + aggr * 2.8f + rng.rangef(-0.2f, 0.5f);
-    p["mudDb"]        = -(2.0f + rng.rangef(0.0f, 4.0f));   // ~300 Hz dip
-    p["drivePost"]    = 1.4f + aggr * 2.6f;
-    p["wsMix"]        = clampf(0.28f + aggr * 0.28f + rng.rangef(-0.05f, 0.10f), 0.0f, 1.0f); // tanh-leaning (keep SQUARE/odd; fold adds even)
-    p["dirtyDrive"]   = 2.2f + aggr * 3.2f + rng.rangef(-0.2f, 0.4f);  // 2nd serial tanh drive (post-fold)
-    p["dirtyMix"]     = clampf(0.15f + aggr * 0.55f + rng.rangef(-0.04f, 0.1f), 0.0f, 0.85f); // tamer@low aggr
-    // --- formant / vowel bank (the talk) ---
-    // Bias vowel choice toward the bright, high-F2 vowels (E/I) so the vocal
-    // energy centres in the 600-2500 Hz presence lane, not the mud below.
+    p["gateDiv"]      = (rng.uniform() < 0.7f) ? 2.0f : gateDivs[gdAlt];
+    p["gateDepth"]    = 0.0f;                                  // NO wub — pure percussive stab
+    p["gateShape"]    = (rng.uniform() < 0.85f) ? 4.0f : 5.0f;
+    // --- distortion staging: tonal odd-harmonic CHUG edge ---
+    // Serial stack (pre-tanh -> post tanh/fold blend -> wavefold -> 2nd dirty tanh),
+    // but tuned MODERATE and tanh-leaning so the square stays TONAL/pitched, tight
+    // and mid-focused. All bounded/normalised so it stays hard, not just louder.
+    p["drivePre"]     = 1.6f + aggr * 2.2f + rng.rangef(-0.2f, 0.4f);
+    p["mudDb"]        = -(2.0f + rng.rangef(0.0f, 3.0f));   // ~300 Hz dip
+    p["drivePost"]    = 1.4f + aggr * 2.0f;
+    p["wsMix"]        = clampf(0.15f + aggr * 0.18f + rng.rangef(-0.04f, 0.06f), 0.0f, 0.6f); // tanh-leaning: ODD harmonics (square)
+    p["dirtyDrive"]   = 2.0f + aggr * 2.8f + rng.rangef(-0.2f, 0.3f);  // 2nd serial tanh drive
+    p["dirtyMix"]     = clampf(0.12f + aggr * 0.45f + rng.rangef(-0.03f, 0.08f), 0.0f, 0.75f); // dirtier w/ aggr
+    // --- formant / vowel bank: TALK STRIPPED (minimal static color, low mix) ---
+    // Vowel path still drawn for determinism, but morph movement is disabled and
+    // the formant is blended in only faintly so the chug stays a static square.
     float v0, v1, v2; pickVowelPath(rng, v0, v1, v2);
     p["vowel0"] = v0; p["vowel1"] = v1; p["vowel2"] = v2;
-    p["formantQ"]     = rng.rangef(5.0f, 11.0f);
-    p["formantMix"]   = rng.rangef(0.62f, 0.90f);   // formant (up-shifted) over low body
-    p["formantGain"]  = rng.rangef(2.4f, 3.6f) + aggr * 0.4f;   // scream harder w/ aggr
-    p["formantShift"] = clampf(rng.rangef(1.25f, 1.45f) + aggr * 0.05f, 1.2f, 1.5f); // octave-up scream
-    p["morphBase"]    = rng.rangef(0.05f, 0.35f);
-    p["morphMod"]     = rng.rangef(0.45f, 0.75f);   // note.mod influence
-    // --- rhythmic modulation ---
-    p["lfoRate"]      = rng.rangef(1.5f, 9.0f);
-    p["lfoDepth"]     = rng.rangef(0.30f, 0.6f);
+    p["formantQ"]     = rng.rangef(4.0f, 8.0f);
+    p["formantMix"]   = rng.rangef(0.05f, 0.15f);   // minimal — NO vocal talk
+    p["formantGain"]  = rng.rangef(1.4f, 2.2f);
+    p["formantShift"] = clampf(rng.rangef(1.0f, 1.15f), 0.95f, 1.25f); // no octave-up scream
+    p["morphBase"]    = rng.rangef(0.1f, 0.4f);
+    p["morphMod"]     = rng.rangef(0.0f, 0.08f);    // ~0: no talk morph movement
+    // --- rhythmic modulation: vowel/LFO movement disabled (static per hit) ---
+    p["lfoRate"]      = rng.rangef(1.0f, 4.0f);
+    p["lfoDepth"]     = rng.rangef(0.0f, 0.06f);    // ~0: no wobble
     p["lfoShape"]     = float(rng.intRange(0, 5));
     p["lfoSteps"]     = float(rng.intRange(2, 8));
     // --- body filter ---
-    p["lpMul"]        = rng.rangef(4.0f, 8.0f) - dark * 1.5f;
-    p["lpQ"]          = rng.rangef(0.7f, 1.6f);
-    // --- output EQ / glue ---
-    // HP raised into 125-155 Hz: the growl's OWN 100-400 Hz content is what makes
-    // the low-mid mud; the sub lane owns everything below. Presence peak pushed
-    // harder and centred in the 950-1800 Hz vocal band.
-    p["hpFreq"]       = rng.rangef(125.0f, 155.0f);
-    p["midGainDb"]    = rng.rangef(5.0f, 8.5f) + aggr * 2.0f;   // scream the 1-3 kHz aggression lane
-    p["midFreq"]      = rng.rangef(1100.0f, 2000.0f);          // centre the scream in 1-3 kHz
-    p["highShelfDb"]  = 3.0f - dark * 9.0f;
-    p["ottAmt"]       = rng.rangef(0.15f, 0.4f);
-    // --- movement polish ---
-    p["phaserRate"]   = rng.rangef(0.2f, 1.2f);
-    p["phaserMix"]    = rng.rangef(0.15f, 0.4f);
-    p["width"]        = 0.08f + nov * 0.18f;
-    // Fast attack so each stab CRACKS like a percussive hit; faster w/ aggr.
-    p["ampAtk"]       = clampf(0.003f - aggr * 0.0018f + rng.rangef(-0.0004f, 0.0012f), 0.0008f, 0.005f);
-    p["ampRel"]       = rng.rangef(0.008f, 0.022f);
-    p["gain"]         = 0.6f;
-    // --- wavefolder ("tearout" bark): 2x-oversampled, blend-controlled, low ---
-    p["foldDrive"]    = 1.4f + aggr * 1.5f + rng.rangef(-0.1f, 0.3f);  // harder pre-fold gain, scales w/ aggr
-    p["foldMix"]      = clampf(0.10f + aggr * 0.16f + rng.rangef(-0.03f, 0.06f), 0.04f, 0.5f); // lighter fold: less even-harmonic, stays square
-    p["foldPre"]      = (rng.uniform() < 0.25f) ? 1.0f : 0.0f; // bias POST-formant so fold+dirty stack serially
-    // --- swept comb-notch ("watery" moving notches): feed-forward, low mix ---
-    p["combMix"]      = rng.rangef(0.04f, 0.22f);     // conservative wet blend
-    p["combG"]        = rng.rangef(0.3f, 0.7f);       // feed-forward gain (<0.9)
-    p["combFb"]       = rng.rangef(0.0f, 0.3f);       // light feedback (<0.9)
-    p["combRateHz"]   = rng.rangef(0.1f, 1.0f);       // slow LFO sweep rate
-    p["combBaseMs"]   = rng.rangef(1.5f, 7.0f);       // base delay (1..8 ms)
+    p["lpMul"]        = rng.rangef(5.0f, 9.0f) - dark * 1.5f;
+    p["lpQ"]          = rng.rangef(0.7f, 1.4f);
+    // --- output EQ / glue: HP keeps the SUB owning the lows; mid-focused chug ---
+    // The tonal chug sits ~150 Hz-2 kHz; HP at 120-150 cedes everything below to
+    // the sub lane. Mid peak centred lower (700-1400 Hz) for a punchy chug body.
+    p["hpFreq"]       = rng.rangef(120.0f, 150.0f);
+    p["midGainDb"]    = rng.rangef(3.0f, 6.0f) + aggr * 1.5f;
+    p["midFreq"]      = rng.rangef(700.0f, 1400.0f);          // mid-focused chug body
+    p["highShelfDb"]  = 2.0f - dark * 7.0f;
+    p["ottAmt"]       = rng.rangef(0.1f, 0.3f);
+    // --- movement polish: phaser DISABLED (static chug) ---
+    p["phaserRate"]   = rng.rangef(0.2f, 1.0f);
+    p["phaserMix"]    = 0.0f;
+    p["width"]        = 0.05f + nov * 0.12f;
+    // --- PUNCHY STAB amp env: fast attack, SHORT decay to a low tail, short release.
+    // Each note is a percussive chug that DIES QUICKLY (not a sustained wub).
+    p["ampAtk"]       = clampf(0.002f - aggr * 0.0012f + rng.rangef(-0.0003f, 0.0008f), 0.0006f, 0.004f);
+    p["ampDec"]       = rng.rangef(0.035f, 0.075f);           // short percussive decay
+    p["ampSus"]       = clampf(0.10f - aggr * 0.05f + rng.rangef(-0.02f, 0.04f), 0.0f, 0.18f); // low tail
+    p["ampRel"]       = rng.rangef(0.01f, 0.03f);
+    p["gain"]         = 0.62f;
+    // --- wavefolder: MODERATE, keeps the square tonal (odd-dominant), not a scream ---
+    p["foldDrive"]    = 1.3f + aggr * 1.1f + rng.rangef(-0.1f, 0.2f);
+    p["foldMix"]      = clampf(0.06f + aggr * 0.14f + rng.rangef(-0.02f, 0.05f), 0.02f, 0.4f);
+    p["foldPre"]      = (rng.uniform() < 0.25f) ? 1.0f : 0.0f; // bias POST so fold+dirty stack serially
+    // --- swept comb-notch: DISABLED (the "watery" moving-notch wonkiness is gone) ---
+    p["combMix"]      = 0.0f;
+    p["combG"]        = rng.rangef(0.3f, 0.7f);
+    p["combFb"]       = rng.rangef(0.0f, 0.3f);
+    p["combRateHz"]   = rng.rangef(0.1f, 1.0f);
+    p["combBaseMs"]   = rng.rangef(1.5f, 7.0f);
 
     // ================= reference-growl match (calibration fingerprint) =========
     // Applied AFTER every rng draw above, so the rng sequence (and determinism)
@@ -204,6 +214,8 @@ StereoBuffer renderGrowl(const Recipe& rc, const Voice& v) {
     const float phaserMix    = clampf(rc.get("phaserMix", 0.3f), 0.0f, 1.0f);
     const float width        = clampf(rc.get("width", 0.12f), 0.0f, 0.6f);
     const float ampAtk       = rc.get("ampAtk", 0.008f);
+    const float ampDec       = std::max(1.0e-4f, rc.get("ampDec", 0.05f));   // CHUG: short percussive decay
+    const float ampSus       = clampf(rc.get("ampSus", 0.10f), 0.0f, 1.0f);  // low tail (percussive stab)
     const float ampRel       = rc.get("ampRel", 0.012f);
     const float gain         = rc.get("gain", 0.6f);
     // Wavefolder (defaults keep the stage OFF so legacy recipes are unchanged).
@@ -259,17 +271,18 @@ StereoBuffer renderGrowl(const Recipe& rc, const Voice& v) {
     ShapeLFO lfo; lfo.init(lfoRate, sr, lfoShape, lfoSteps, nrng.next());
     LFO phaser; phaser.setRate(phaserRate, sr);
     LFO pwm; pwm.setRate(pwmRate, sr);            // slow pulse-width movement
-    EnvADSR amp; amp.start(ampAtk, 0.06f, 0.85f, ampRel, sr);
+    // Percussive STAB envelope: fast attack, SHORT decay to a low sustain (ampSus),
+    // short release. Even when the note is held, the chug decays fast to a quiet
+    // tail — a punchy hit, not a sustained wub.
+    EnvADSR amp; amp.start(ampAtk, ampDec, ampSus, ampRel, sr);
     EnvAD idxEnv; idxEnv.start(0.001f, fmDecay, sr);
 
-    // Tempo-synced amplitude gate ("wub"): active only when the caller supplies a
-    // beat rate (v.syncHz). Square/stepped shape -> unipolar amp multiplier, declicked.
+    // Tempo-synced amplitude gate ("wub") is STRIPPED for the CHUG: the wobble is
+    // gone — rhythm now comes entirely from the note pattern (short stabs on the
+    // beat). gateSeed is still drawn so the downstream nrng draw order (the comb
+    // LFO phase seed below) is unchanged; the gate params are retained but inert.
     const uint64_t gateSeed = nrng.next();       // consumed unconditionally for determinism
-    const bool gateOn = v.syncHz > 0.0;
-    ShapeLFO gateLfo;
-    if (gateOn) gateLfo.init(clampd(v.syncHz * double(gateDivF), 0.1, 200.0),
-                             sr, gateShape, 8, gateSeed);
-    OnePole gateSmooth; gateSmooth.setTime(0.003f, sr); gateSmooth.reset(1.0f);
+    (void)gateSeed; (void)gateDivF; (void)gateDepth; (void)gateShape;
 
     // New tone stages. FoldOS2 has no random state. The comb LFO phase is seeded
     // from nrng AFTER gateSeed so the existing draw order (and legacy sound) is
@@ -419,17 +432,9 @@ StereoBuffer renderGrowl(const Recipe& rc, const Voice& v) {
         h = hsh.process(h);
         h = ott.process(h) * 0.5f;
 
-        // --- tempo-synced amplitude gate (the "wub") ---
-        // Unipolar multiplier in [1-depth, 1], declicked by a ~3 ms one-pole. Only
-        // reduces level (never louder). Free-running when v.syncHz == 0.
-        float gmul = 1.0f;
-        if (gateOn) {
-            float g = gateLfo.tick();                       // bipolar [-1,1]
-            float uni = 0.5f * (g + 1.0f);                  // [0,1]
-            float target = (1.0f - gateDepth) + gateDepth * uni; // [1-depth, 1]
-            gmul = gateSmooth.tick(target);
-        }
-        float mono = dc.tick(h) * amp.tick(gate) * v.velocity * gain * gmul;
+        // --- amplitude: pure percussive STAB (no wub gate) ---
+        float mono = dc.tick(h) * amp.tick(gate) * v.velocity * gain;
+        if (!std::isfinite(mono)) mono = 0.0f;              // NaN/Inf guard
 
         float rC = apR.process(mono);
         float l = mono;
@@ -582,12 +587,21 @@ Recipe makeSubRecipe(float aggr, float dark, float nov, Rng& rng) {
     Recipe r; r.role = Role::Sub; r.seed = rng.next();
     r.name = hexName("sub", rng);
     auto& p = r.p;
-    p["h2"]     = rng.rangef(0.05f, 0.12f);
-    p["h3"]     = rng.rangef(0.03f, 0.10f) * (1.0f - dark * 0.5f);
-    p["drive"]  = 1.05f + aggr * 0.6f;
-    p["ampAtk"] = rng.rangef(0.002f, 0.006f);
-    p["ampRel"] = rng.rangef(0.02f, 0.05f);
-    p["gain"]   = 0.7f;
+    // BOOMING CHUG sub: sine fundamental + a little harmonic weight, driven /
+    // saturated for grit and body, kept in the sub band, hitting punchy WITH the
+    // square mid chug. Mono, mostly <120 Hz. Drive scales with aggr.
+    p["h2"]        = rng.rangef(0.08f, 0.18f);                     // more weight than a pure sine
+    p["h3"]        = rng.rangef(0.04f, 0.12f) * (1.0f - dark * 0.4f);
+    p["drive"]     = 1.3f + aggr * 1.6f + rng.rangef(-0.1f, 0.2f); // aggressive saturation, scales w/ aggr
+    p["pitchStart"]= rng.rangef(0.0f, 1.5f);                       // short pitch blip (semitones), adds boom
+    p["pitchDecay"]= rng.rangef(0.015f, 0.04f);                    // fast blip decay
+    p["lpFreq"]    = rng.rangef(110.0f, 150.0f);                   // contain distortion in the sub band
+    // punchy env with body/boom: fast attack, short punch decay, solid sustained body.
+    p["ampAtk"]    = rng.rangef(0.0015f, 0.004f);
+    p["ampDec"]    = rng.rangef(0.04f, 0.09f);
+    p["ampSus"]    = rng.rangef(0.65f, 0.82f);                     // booming body under the chug
+    p["ampRel"]    = rng.rangef(0.02f, 0.05f);
+    p["gain"]      = 0.72f;
     return r;
 }
 
@@ -598,22 +612,36 @@ StereoBuffer renderSub(const Recipe& rc, const Voice& v) {
     const double freq = std::max(20.0, v.freqHz);
     const float h2 = rc.get("h2", 0.08f);
     const float h3 = rc.get("h3", 0.05f);
-    const float drive = rc.get("drive", 1.2f);
+    const float drive = std::max(1.0f, rc.get("drive", 1.2f));
+    const float pitchStart = std::max(0.0f, rc.get("pitchStart", 0.0f));
+    const float pitchDecay = std::max(0.005f, rc.get("pitchDecay", 0.03f));
+    const float lpFreq = clampf(rc.get("lpFreq", 130.0f), 60.0f, 300.0f);
     const float ampAtk = rc.get("ampAtk", 0.004f);
+    const float ampDec = std::max(1.0e-4f, rc.get("ampDec", 0.06f));
+    const float ampSus = clampf(rc.get("ampSus", 0.75f), 0.0f, 1.0f);
     const float ampRel = rc.get("ampRel", 0.03f);
     const float gain = rc.get("gain", 0.7f);
+    const float driveNorm = 1.0f / std::tanh(drive);   // peak-normalise the saturation (bounded)
     double ph = 0;
-    EnvADSR amp; amp.start(ampAtk, 0.08f, 0.9f, ampRel, sr);
+    EnvADSR amp; amp.start(ampAtk, ampDec, ampSus, ampRel, sr);
     const size_t gateN = size_t(std::llround(v.gateSec * sr));
+    Biquad lp; lp.setLowpass(lpFreq, 0.707, sr);       // keep the driven sub warm, not fizzy
     DCBlock dc;
     for (size_t n = 0; n < N; ++n) {
         const bool gate = n < gateN;
+        double t = double(n) / sr;
+        // short pitch blip for extra "boom" on the transient (0 by default -> no blip).
+        double penv = pitchStart * std::exp(-t / double(pitchDecay));
+        double f = freq * std::pow(2.0, penv / 12.0);
         double s = std::sin(kTwoPi * ph)
                  + h2 * std::sin(kTwoPi * 2.0 * ph)
                  + h3 * std::sin(kTwoPi * 3.0 * ph);
-        ph += freq / sr; if (ph >= 1.0) ph -= 1.0;
-        float o = std::tanh(float(s) * drive) / std::tanh(drive);
+        ph += f / sr; if (ph >= 1.0) ph -= 1.0;
+        // aggressive saturation (weight + grit), peak-normalised so |o| stays bounded.
+        float o = std::tanh(float(s) * drive) * driveNorm;
+        o = lp.process(o);                             // contain harmonics in the sub band (<~150 Hz)
         float mono = dc.tick(o) * amp.tick(gate) * v.velocity * gain;
+        if (!std::isfinite(mono)) mono = 0.0f;         // NaN/Inf guard
         out.l[n] = mono; out.r[n] = mono; // strictly mono
     }
     return out;

@@ -441,10 +441,10 @@ Recipe makeCrashRecipe(float aggr, float dark, float nov, Rng& rng) {
     r.name = dName("crash", rng);
     auto& p = r.p;
     p["hpFreq"] = rng.rangef(5000.0f, 6500.0f) - dark * 1200.0f;
-    p["decay"]  = rng.rangef(1.3f, 2.4f);
+    p["decay"]  = rng.rangef(0.7f, 1.3f);   // shorter — a subtle accent, not a washy cheese-crash
     p["shimmer"] = rng.rangef(0.3f, 0.55f); // comb-resonated metal partials
-    p["width"]  = 0.9f;
-    p["gain"]   = 0.5f;
+    p["width"]  = 0.55f;                     // narrower/less splashy
+    p["gain"]   = 0.32f;                     // sit it back in the mix
     return r;
 }
 StereoBuffer renderCrash(const Recipe& rc, const Voice& v) {
@@ -458,7 +458,7 @@ StereoBuffer renderCrash(const Recipe& rc, const Voice& v) {
     const float gain = rc.get("gain", 0.5f);
     Biquad hpL, hpR, shL, shR;
     hpL.setHighpass(hpFreq, 0.707, sr); hpR.setHighpass(hpFreq, 0.707, sr);
-    shL.setHighShelf(10000.0, 3.0, sr); shR.setHighShelf(10000.0, 3.0, sr);
+    shL.setHighShelf(10000.0, 1.0, sr); shR.setHighShelf(10000.0, 1.0, sr); // less splashy top
     // Comb pair adds inharmonic metallic shimmer instead of pure white wash.
     Comb combL, combR;
     combL.fb = 0.55f; combL.damp = 0.15f; combL.setMaxDelay(int(sr / 900.0) + 8);
