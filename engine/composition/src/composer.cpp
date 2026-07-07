@@ -266,8 +266,10 @@ void Comp::addBass(const Section& s, Rng& r, int skipFirstBar) {
             bool hit[8];
             for (int e = 0; e < 8; ++e) {
                 if ((e % 2) == 0) { hit[e] = true; continue; } // on-beat: locked
-                const double p = 0.35 + 0.50 * agg + 0.15 * plan.complexity01;
-                hit[e] = r.chance(std::min(0.97, p));           // busier with aggr
+                // Busier chug (fills the gaps like the reference's near-constant
+                // 8ths); off-beats now hit most of the time even at mid aggression.
+                const double p = 0.62 + 0.33 * agg + 0.10 * plan.complexity01;
+                hit[e] = r.chance(std::min(0.98, p));           // busier with aggr
             }
 
             // Precompute stab (slot,time) pairs so lengths clamp to the next
