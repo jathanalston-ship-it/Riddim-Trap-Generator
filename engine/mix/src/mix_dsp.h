@@ -307,9 +307,15 @@ inline void stereoWiden(StereoBuffer& buf, double fs, float amount, float hpHz =
         const float side = 0.5f * (buf.l[i] - buf.r[i]);
         float dec = a2.process(a1.process(a0.process(mid)));
         hpY = hpC * (hpY + dec - hpPrev); hpPrev = dec;   // one-pole HP on the decorrelated copy
-        const float extra = amount * hpY;
-        buf.l[i] = mid + side + extra;
-        buf.r[i] = mid - side - extra;
+        float extra = amount * hpY;
+        // Mono-safety cap: total side must not exceed the mid magnitude, else the
+        // mono sum cancels. Clamp |side+extra| <= |mid| so mono-fold loss stays small.
+        const float lim = std::fabs(mid);
+        float tot = side + extra;
+        if (tot >  lim) tot =  lim;
+        if (tot < -lim) tot = -lim;
+        buf.l[i] = mid + tot;
+        buf.r[i] = mid - tot;
     }
 }
 

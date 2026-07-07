@@ -336,13 +336,13 @@ StereoBuffer masterize(const StereoBuffer& premaster, const Plan& plan,
     // loudness; grinding past that floor buys loudness by destroying punch
     // (and the sub clipper's intermod repaints low-mids). Floor comes from
     // the active calibration's measured crest when present.
-    // Punch over loudness: references keep ~5-6 dB of drop crest; grinding to
-    // 3.6 made mine a flat, lifeless wall. Settle the loop at ~5 dB crest
-    // (slightly quieter master, much punchier transients).
-    float crestFloor = 5.0f;
+    // Punch vs loudness balance: 3.6 made a flat wall; 5.0 left the master too
+    // quiet (-5 dBTP). 4.2 keeps clearly more transient life than before while
+    // still driving the loop to commercial loudness.
+    float crestFloor = 4.2f;
     if (const auto& cal = Calibration::active()) {
         const auto& prof = cal->forGenre(plan.params.genre);
-        if (prof.present) crestFloor = std::clamp(prof.crestDb - 0.5f, 4.0f, 8.0f);
+        if (prof.present) crestFloor = std::clamp(prof.crestDb - 0.5f, 3.6f, 8.0f);
     }
 
     for (int pass = 0; pass < 6; ++pass) {
