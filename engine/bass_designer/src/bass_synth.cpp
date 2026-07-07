@@ -463,10 +463,13 @@ Recipe makeScreechRecipe(float aggr, float dark, float nov, Rng& rng) {
     // formant scream (higher octave than growl)
     float v0, v1, v2; pickVowelPath(rng, v0, v1, v2);
     p["vowel0"] = v0; p["vowel1"] = v1; p["vowel2"] = v2;
-    p["formantOct"]   = rng.rangef(1.7f, 2.4f) + aggr * 0.1f;   // octave-up scream, higher w/ aggr
-    p["formantQ"]     = rng.rangef(5.0f, 10.0f);
-    p["formantMix"]   = rng.rangef(0.5f, 0.8f);
-    p["formantGain"]  = rng.rangef(2.2f, 3.2f) + aggr * 0.3f;
+    // Horn/stab (riddim BassB) + screech: sit the formant in the MID (brass
+    // body ~500-2.5k) not an octave-up hiss — a real synth-horn stab is
+    // mid-dominant (ref mid > hi), so keep the scream centred lower.
+    p["formantOct"]   = rng.rangef(0.9f, 1.4f) + aggr * 0.1f;
+    p["formantQ"]     = rng.rangef(4.0f, 8.0f);
+    p["formantMix"]   = rng.rangef(0.55f, 0.85f);
+    p["formantGain"]  = rng.rangef(2.4f, 3.4f) + aggr * 0.3f;
     p["morphBase"]    = rng.rangef(0.05f, 0.35f);
     p["morphMod"]     = rng.rangef(0.45f, 0.75f);
     p["lfoRate"]      = rng.rangef(2.0f, 9.0f);

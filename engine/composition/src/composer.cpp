@@ -314,6 +314,25 @@ void Comp::addBass(const Section& s, Rng& r, int skipFirstBar) {
                 add(Lane::BassA, t, len, bassPitch(off), hvel(r, velBase), artic);
             }
 
+            // BassB = HORN/STAB layer: an aggressive synth stab locked to every
+            // chug alongside the BassA growl (the two-tonal-bass architecture of
+            // reference riddim — growl + horn over a constant sub). On-beats
+            // always stab; off-beats follow the same hit[] fills as the growl so
+            // the two voices interlock exactly. Pitched mostly root, with an
+            // occasional octave-up bark for the "horn" bite. Short/punchy.
+            for (int e = 0; e < 8; ++e) {
+                if (!hit[e]) continue;
+                const double t = base + b * BPB + e * 0.5;
+                const double nextT = base + b * BPB + (e + 1) * 0.5;
+                const double len = std::min(0.22, (nextT - t) * 0.85);
+                // Horn mostly doubles the root; rare octave-up stab for bite.
+                int hoff = (r.chance(0.14 + 0.20 * plan.melody01)) ? 12 : 0;
+                // Bright, forward articulation so the formant "horn" opens up.
+                float hartic = std::min(1.0f, 0.55f + 0.40f * pal.aggression01);
+                float hvelBase = (e == 0) ? 0.94f : ((e % 2 == 0) ? 0.86f : 0.78f);
+                add(Lane::BassB, t, len, bassPitch(hoff), hvel(r, hvelBase), hartic);
+            }
+
             // BassC: rare octave accent on an off-beat when a 3rd voice exists.
             if (pal.bassVoices >= 3 && r.chance(0.22)) {
                 const int slot = r.chance(0.5) ? 3 : 5;

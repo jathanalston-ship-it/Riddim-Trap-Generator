@@ -21,7 +21,7 @@ namespace {
 // Balance target (doc 07): low band (20-120 Hz) carries ~40-50% of drop
 // energy, mid-bass character audibly on top — sub supports, growls lead.
 constexpr float kLaneGainDb[kLaneCount] = {
-    /*Sub*/ -17.0f, /*BassA*/ -2.0f, /*BassB*/ -3.5f, /*BassC*/ -6.0f,
+    /*Sub*/ -17.0f, /*BassA*/ -2.5f, /*BassB*/ -3.0f, /*BassC*/ -7.0f,
     /*Kick*/ -9.0f, /*Snare*/ -6.5f, /*HatClosed*/ -12.5f, /*HatOpen*/ -13.5f,
     /*Perc*/ -13.5f, /*Melody*/ -12.0f, /*Pad*/ -15.0f, /*Riser*/ -12.5f,
     /*Downlifter*/ -12.5f, /*Impact*/ -8.0f, /*Crash*/ -11.0f,

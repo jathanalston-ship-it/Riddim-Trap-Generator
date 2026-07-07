@@ -196,7 +196,11 @@ Role roleForLane(Lane lane, Genre genre) {
     switch (lane) {
         case Lane::Sub:       return Role::Sub;
         case Lane::BassA:     return trap ? Role::Bass808 : Role::Growl;
-        case Lane::BassB:     return trap ? Role::Screech : Role::Growl;
+        // Riddim BassB is the aggressive HORN/STAB layer (bright Screech voice)
+        // that hits on every chug alongside the BassA growl — the two-tonal-bass
+        // architecture of reference riddim (e.g. Seleman): growl + horn stab over
+        // a constant sub.
+        case Lane::BassB:     return Role::Screech;
         case Lane::BassC:     return Role::Screech;
         case Lane::Kick:      return Role::Kick;
         case Lane::Snare:     return Role::Snare;
