@@ -119,6 +119,65 @@ inline void tanhSaturate(StereoBuffer& buf, double drive) {
 }
 
 // ---------------------------------------------------------------------------
+// Clippers. Unlike a brickwall limiter these add odd harmonics and tighten
+// transients, buying loudness/punch without pumping. hardClip is an absolute
+// ceiling; softClipSample is a cubic soft-knee (unit small-signal slope, output
+// bounded to +/-2/3) that generates odd harmonics as it is pushed.
+// ---------------------------------------------------------------------------
+inline float hardClip(float x, float ceil) {
+    if (ceil <= 0.f) return 0.f;
+    return x > ceil ? ceil : (x < -ceil ? -ceil : x);
+}
+
+inline float softClipSample(float x, float drive) {
+    float u = x * (drive > 0.f ? drive : 1.f);
+    if (u >  1.f) return  2.f / 3.f;
+    if (u < -1.f) return -2.f / 3.f;
+    return u - u * u * u * (1.f / 3.f);
+}
+
+// Drive a whole stereo bus through the odd-harmonic soft clipper with RMS
+// makeup, then a hard ceiling to guarantee a bounded, finite result. drive>1
+// tightens transients + screams (kick low-end control, snare transient shaping,
+// master edge) without a brickwall limiter. Pure/deterministic.
+inline void clipDrive(StereoBuffer& buf, double drive, float ceil = 0.98f) {
+    if (buf.empty() || drive <= 0.0) return;
+    double pre = 0.5 * (channelRms(buf.l) + channelRms(buf.r));
+    const float d = float(drive);
+    for (auto& s : buf.l) s = softClipSample(s, d);
+    for (auto& s : buf.r) s = softClipSample(s, d);
+    double post = 0.5 * (channelRms(buf.l) + channelRms(buf.r));
+    if (post > 1e-9 && pre > 1e-9) buf.applyGain(float(pre / post));
+    for (auto& s : buf.l) s = hardClip(s, ceil);
+    for (auto& s : buf.r) s = hardClip(s, ceil);
+}
+
+// ---------------------------------------------------------------------------
+// Band-split saturation: keep everything below splitHz CLEAN (sub/low-bass stays
+// tight, no distortion under 100 Hz) and tanh-drive only the band above it, so
+// the growl's mids scream without smearing the low end. Complementary split
+// (low = LP, high = original - low) is phase-summing and deterministic. drive is
+// the tanh amount applied to the high band only.
+// ---------------------------------------------------------------------------
+inline void driveAboveClean(StereoBuffer& buf, double fs, double splitHz, double drive) {
+    if (buf.empty() || drive <= 0.0) return;
+    const size_t n = buf.size();
+    StereoBuffer low(n), high(n);
+    Biquad lpL = makeLowpass(fs, splitHz, 0.6), lpR = makeLowpass(fs, splitHz, 0.6);
+    for (size_t i = 0; i < n; ++i) {
+        low.l[i] = lpL.process(buf.l[i]);
+        low.r[i] = lpR.process(buf.r[i]);
+        high.l[i] = buf.l[i] - low.l[i];   // complementary high band
+        high.r[i] = buf.r[i] - low.r[i];
+    }
+    tanhSaturate(high, drive);             // only the mid/high band is driven
+    for (size_t i = 0; i < n; ++i) {
+        buf.l[i] = low.l[i] + high.l[i];
+        buf.r[i] = low.r[i] + high.r[i];
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Mid/side stereo width. width 0 → mono, 1 → unchanged, >1 → wider.
 // ---------------------------------------------------------------------------
 inline void applyWidth(StereoBuffer& buf, float width) {

@@ -21,7 +21,7 @@ namespace {
 // Balance target (doc 07): low band (20-120 Hz) carries ~40-50% of drop
 // energy, mid-bass character audibly on top — sub supports, growls lead.
 constexpr float kLaneGainDb[kLaneCount] = {
-    /*Sub*/ -13.5f, /*BassA*/ -2.0f, /*BassB*/ -3.0f, /*BassC*/ -6.0f,
+    /*Sub*/ -10.5f, /*BassA*/ -5.5f, /*BassB*/ -6.5f, /*BassC*/ -8.0f,
     /*Kick*/ -9.0f, /*Snare*/ -7.0f, /*HatClosed*/ -16.0f, /*HatOpen*/ -17.0f,
     /*Perc*/ -15.5f, /*Melody*/ -12.0f, /*Pad*/ -15.0f, /*Riser*/ -12.5f,
     /*Downlifter*/ -12.5f, /*Impact*/ -8.0f, /*Crash*/ -12.0f,
@@ -243,17 +243,40 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
         for (size_t i = 0; i < N; ++i) { bassBus.l[i] += b.l[i]; bassBus.r[i] += b.r[i]; }
     }
     if (anyBass) {
-        // Low-mid mud dip + presence lift: pull the growl's residual 250-420 Hz
-        // energy down and push its 1.3 kHz vocal band forward so the bass bus
-        // carries the mid/presence lane the references sit in (7-15%).
-        applyStereo(makePeaking(sr, 330.0, -3.5, 1.1), bassBus);
-        applyStereo(makePeaking(sr, 1300.0, 4.0, 0.9), bassBus);
-        tanhSaturate(bassBus, 1.0 + 2.0 * plan.mixAggression);
-        ottLite(bassBus, sr, 120.0, 2500.0, 0.25 + 0.35 * plan.mixAggression);
-        applyWidth(bassBus, 0.30f);   // a touch of upper-bass stereo interest
+        // Low-mid mud dip (deep + wide): scoop the growl's ~150-450 Hz body hard
+        // so the 120-500 band stops masking the sub and mids (target share ~0.11;
+        // was reading ~0.33 — muddy). Two scoops: a wide body cut + a lower dip.
+        applyStereo(makePeaking(sr, 260.0, -8.0, 0.6), bassBus);
+        applyStereo(makePeaking(sr, 160.0, -4.0, 0.9), bassBus);
+        // Mid presence: a broad lift through the 600-2500 Hz "scream" band plus a
+        // narrower bite so the growl carries the mid/presence lane the aggressive
+        // references sit in (500-2k share ~0.06).
+        applyStereo(makePeaking(sr, 1000.0, 5.0, 0.55), bassBus);
+        applyStereo(makePeaking(sr, 1800.0, 3.0, 1.1), bassBus);
+        // Multiband distortion: keep <100 Hz CLEAN (sub tight) and tanh-drive the
+        // mid/high band only, so harmonics scream where the presence lift sits.
+        driveAboveClean(bassBus, sr, 240.0, 1.4 + 2.2 * plan.mixAggression);
+        // Lighter glue than before: less multiband density -> more transient
+        // crest/punch survives (density was flattening the drop to crest ~2.4).
+        ottLite(bassBus, sr, 120.0, 2500.0, 0.10 + 0.15 * plan.mixAggression);
+        applyWidth(bassBus, 0.18f);   // tearout is centered/focused, not wide
         sweepFilter(bassBus, sr, spb, true, [&](double beat) {
             return std::max(20.0, double(score.buildFilter.sample(beat)) * 400.0);
         });
+        // Break dip: pull the bass down in breaks so the drop slams with more
+        // contrast (bass is the dominant tonal element when the drop hits).
+        {
+            double g = 1.0;
+            const double smooth = std::exp(-1.0 / (0.005 * sr));  // 5 ms glide
+            for (size_t i = 0; i < N; ++i) {
+                double beat = (double(i) / sr) / spb;
+                float bs = score.breakSoften.sample(beat);
+                double tgt = (bs > 0.0f) ? dbToGain(-5.0f * bs) : 1.0;
+                g = smooth * g + (1.0 - smooth) * tgt;
+                bassBus.l[i] *= float(g);
+                bassBus.r[i] *= float(g);
+            }
+        }
     }
 
     // --- DRUM bus ----------------------------------------------------------
@@ -278,7 +301,7 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
         if (!has(hl)) continue;
         StereoBuffer b = laneBuf(hl);
         applyStereo(makeHighpass(sr, 300.0), b);
-        applyWidth(b, 0.7f);
+        applyWidth(b, 0.5f);
         addToDrums(b);
         addSend(b, hl);
     }
@@ -309,7 +332,7 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
         applyStereo(makeLowpass(sr, 9000.0), padBuf);
         applyEnv(padBuf, kickDuck);                          // kick ducks pad
         applyEnv(padBuf, snareDuck);                         // snare ducks pad lightly
-        applyWidth(padBuf, 0.95f);                           // slightly wider pad
+        applyWidth(padBuf, 0.72f);                           // narrower pad (focused field)
         for (size_t i = 0; i < N; ++i) { musicBus.l[i] += padBuf.l[i]; musicBus.r[i] += padBuf.r[i]; }
         addSend(padBuf, Lane::Pad);
     }
@@ -327,7 +350,7 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
     if (has(Lane::Riser)) {
         StereoBuffer b = laneBuf(Lane::Riser);
         applyStereo(makeHighpass(sr, 150.0), b);
-        applyWidth(b, 0.85f);
+        applyWidth(b, 0.6f);
         addToFx(b);
         addSend(b, Lane::Riser);                             // riser tails pushed back
     }
@@ -343,7 +366,7 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
     }
     if (has(Lane::Crash)) {
         StereoBuffer b = laneBuf(Lane::Crash);
-        applyWidth(b, 0.7f);
+        applyWidth(b, 0.55f);
         addToFx(b);
         addSend(b, Lane::Crash);
     }
@@ -364,8 +387,8 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
             float bf = score.buildFilter.sample(beat);
             float bs = score.breakSoften.sample(beat);
             double tgt = 1.0;
-            if (inLastBuildBar(beat) && bf > 0.85f) tgt *= dbToGain(-3.0f);
-            if (bs > 0.0f) tgt *= dbToGain(-1.5f * bs);
+            if (inLastBuildBar(beat) && bf > 0.85f) tgt *= dbToGain(-4.0f);
+            if (bs > 0.0f) tgt *= dbToGain(-4.0f * bs);   // deeper break dip -> more drop contrast
             g = smooth * g + (1.0 - smooth) * tgt;
             drumBus.l[i] *= float(g);
             drumBus.r[i] *= float(g);
@@ -379,6 +402,12 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
     // growl's vocal register without touching the kick's sub punch (<120 Hz).
     applyStereo(makePeaking(sr, 320.0, -6.0, 0.8), drumBus);
     applyStereo(makePeaking(sr, 180.0, -3.0, 1.1), drumBus);
+
+    // --- Drum-bus clipper --------------------------------------------------
+    // Odd-harmonic soft clip: tightens the kick's low-end sustain and caps the
+    // snare transient so the bus reads punchy (tighter kick + controlled snare)
+    // instead of splatty. Raises loudness/punch without a brickwall limiter.
+    clipDrive(drumBus, 1.2 + 1.0 * plan.mixAggression, 0.98f);
 
     // --- Sum buses ---------------------------------------------------------
     for (size_t i = 0; i < N; ++i) {
@@ -410,13 +439,13 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
             applyStereo(makeHighpass(sr, 200.0), nearWet);   // keep lows out of the verb
             applyStereo(makeLowpass(sr, 9000.0), nearWet);   // bright but not harsh
             applyEnv(nearWet, verbDuck);
-            applyWidth(nearWet, 1.15f);
+            applyWidth(nearWet, 0.95f);                       // narrower wet field
         }
 
         // FAR bus: long, dark, big room.
         StereoBuffer farWet(N);
         {
-            RoomVerb rv; rv.init(sr, /*preMs*/ 26.0, /*fb*/ 0.85f, /*damp*/ 0.62f, /*size*/ 1.25);
+            RoomVerb rv; rv.init(sr, /*preMs*/ 26.0, /*fb*/ 0.80f, /*damp*/ 0.62f, /*size*/ 1.25);
             for (size_t i = 0; i < N; ++i) {
                 float x = 0.5f * (farSend.l[i] + farSend.r[i]);
                 float wl, wr; rv.process(x, wl, wr);
@@ -425,7 +454,7 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
             applyStereo(makeHighpass(sr, 220.0), farWet);    // protect low-mids
             applyStereo(makeLowpass(sr, 7000.0), farWet);    // darker = further back
             applyEnv(farWet, verbDuck);
-            applyWidth(farWet, 1.30f);
+            applyWidth(farWet, 1.05f);                        // pulled in from 1.30 (focused field)
         }
 
         // Ping-pong throws: small, band-limited rhythmic depth from melody and
@@ -443,8 +472,10 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
             applyEnv(ppWet, verbDuck);
         }
 
-        // Sum ducked, band-limited wet into the mix (modest, additive levels).
-        const float nearGain = 0.90f, farGain = 0.80f, ppGain = 0.45f;
+        // Sum ducked, band-limited wet into the mix. Lower wet levels than before:
+        // the reverb wash was filling the gaps (raising the RMS floor -> low crest)
+        // and widening the field. Trimmed for a drier, punchier, more centered mix.
+        const float nearGain = 0.72f, farGain = 0.52f, ppGain = 0.30f;
         for (size_t i = 0; i < N; ++i) {
             mix.l[i] += nearWet.l[i] * nearGain + farWet.l[i] * farGain + ppWet.l[i] * ppGain;
             mix.r[i] += nearWet.r[i] * nearGain + farWet.r[i] * farGain + ppWet.r[i] * ppGain;
@@ -455,6 +486,13 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
     sweepFilter(mix, sr, spb, false, [&](double beat) {
         return 20000.0 - double(score.breakSoften.sample(beat)) * 16000.0;
     });
+
+    // --- Master edge: gentle pre-safety soft clip --------------------------
+    // Shave the hardest peaks with odd harmonics so the final true-peak trim
+    // doesn't have to pull the whole track down (more loudness + tearout edge).
+    // Light drive, high ceiling; runs BEFORE the untouched monoBelow ->
+    // calibration -> headroom safety chain.
+    clipDrive(mix, 1.1, 0.99f);
 
     // --- Stereo policy: mono below 120 Hz ----------------------------------
     monoBelow(mix, sr, 120.0);

@@ -43,9 +43,13 @@ Recipe makeKickRecipe(float aggr, float dark, float nov, Rng& rng) {
     const auto& dp = rtg::DrumProfile::active();
     const float body = dp.kickBodyHz;                 // ~55 Hz (refs 47-63)
     const float decay = dp.kickDecayMs * 0.001f;      // ~0.09 s, biased short
-    p["startHz"]   = rng.rangef(body * 2.1f, body * 2.9f);          // glide start
-    p["endHz"]     = rng.rangef(body * 0.86f, body * 1.14f);        // settles ~body
-    p["pitchMs"]   = rng.rangef(0.020f, 0.045f);
+    p["startHz"]   = rng.rangef(body * 2.1f, body * 2.9f);          // glide start (legacy)
+    p["endHz"]     = rng.rangef(body * 0.86f, body * 1.14f);        // root: settles ~body
+    p["pitchMs"]   = rng.rangef(0.020f, 0.045f);                    // legacy glide tau
+    // Fast downward PITCH ENVELOPE (semitone drop -> root) — the tearout
+    // "thump/laser" transient. Bigger + faster when aggressive.
+    p["pitchDropSemis"] = rng.rangef(12.0f, 18.0f) + aggr * 5.0f;   // ~12-23 st
+    p["pitchDropMs"]    = rng.rangef(0.018f, 0.040f);              // exp time-const
     // Decay from the profile, biased short; trap a touch boomier.
     p["bodyDecay"] = rng.rangef(decay * 0.78f, decay * 1.22f) + (1.0f - aggr) * 0.035f;
     // "Punch": low harmonics (3f-5f, ~140-260 Hz) on a medium env give clean
@@ -64,9 +68,14 @@ Recipe makeKickRecipe(float aggr, float dark, float nov, Rng& rng) {
     p["clickAmt"]  = kClickCal * dp.kickClickShare * (0.85f + 0.45f * aggr);
     p["clickHz"]   = rng.rangef(3000.0f, 4200.0f);
     p["clickMs"]   = rng.rangef(0.004f, 0.008f);    // longer than a tick -> real 2-6k energy
+    // Attack CLICK/SNAP burst: HP'd noise, ultra-short — pure attack definition.
+    p["clickAmount"] = rng.rangef(0.55f, 0.85f) + aggr * 0.35f;
     p["bodyLP"]    = rng.rangef(2800.0f, 3800.0f);  // guarantees no top-end fizz
+    // PARALLEL distortion grit: a copy HP'd at ~220 Hz, saturated, mixed back —
+    // grit WITHOUT muddying the low end. Hotter when aggressive.
+    p["parallelDriveMix"] = rng.rangef(0.14f, 0.26f) + aggr * 0.18f;  // 0..~0.44
     p["drive"]     = 1.0f + aggr * 0.6f;            // <=1.3 @0.5, <=1.6 @1.0
-    p["gain"]      = 0.85f;
+    p["gain"]      = 0.82f;
     return r;
 }
 
@@ -74,9 +83,10 @@ StereoBuffer renderKick(const Recipe& rc, const Voice& v) {
     const size_t N = drumLen(v);
     StereoBuffer out(N);
     const double sr = v.sr;
-    const float startHz = rc.get("startHz", 140.0f);
-    const float endHz = rc.get("endHz", 48.0f);
-    const float pitchMs = rc.get("pitchMs", 0.03f);
+    const float endHz = rc.get("endHz", 48.0f);        // root the pitch env lands on
+    const float pitchMs = rc.get("pitchMs", 0.03f);    // legacy fallback for tau
+    const float pitchDropSemis = rc.get("pitchDropSemis", 14.0f);
+    const float pitchDropMs = rc.get("pitchDropMs", pitchMs);
     const float bodyDecay = rc.get("bodyDecay", 0.24f);
     const float punchAmt = rc.get("punchAmt", 0.5f);
     const float punchMs = rc.get("punchMs", 0.04f);
@@ -84,32 +94,47 @@ StereoBuffer renderKick(const Recipe& rc, const Voice& v) {
     const float knockAmt = rc.get("knockAmt", 0.4f);
     const float knockMs = rc.get("knockMs", 0.025f);
     const float clickAmt = rc.get("clickAmt", 0.55f);
+    const float clickAmount = rc.get("clickAmount", 0.7f);
     const float clickHz = rc.get("clickHz", 3500.0f);
     const float clickMs = rc.get("clickMs", 0.006f);
     const float bodyLP = rc.get("bodyLP", 3200.0f);
+    const float parallelDriveMix = clampf(rc.get("parallelDriveMix", 0.22f), 0.0f, 0.8f);
     const float drive = rc.get("drive", 1.3f);
-    const float gain = rc.get("gain", 0.85f);
+    const float gain = rc.get("gain", 0.82f);
+
+    // Pitch envelope: instantaneous freq = root * 2^((dropSemis * exp(-t/tau))/12).
+    // Starts +dropSemis above root and falls exponentially to root — the fast
+    // downward "laser" transient that gives the kick its punch.
+    const double root = std::max(20.0f, endHz);
+    const double tau = std::max(0.004f, pitchDropMs);
 
     double ph = 0, kph = 0;
     EnvAD body;  body.start(0.0006f, bodyDecay, sr);
     EnvAD punch; punch.start(0.0004f, punchMs, sr);
     EnvAD knock; knock.start(0.0006f, knockMs, sr);
     EnvAD click; click.start(0.0002f, clickMs, sr);
+    EnvAD snap;  snap.start(0.00005f, 0.0035f, sr);          // ultra-fast attack burst
     Biquad bodyLp; bodyLp.setLowpass(bodyLP, 0.707, sr);
     Biquad clickBp; clickBp.setBandpass(clickHz, 0.9, sr);   // broad 2-6k knock
     Biquad clickHp; clickHp.setHighpass(1800.0, 0.707, sr);  // keep click out of low band
     Biquad clickLp; clickLp.setLowpass(6000.0, 0.707, sr);   // hard cap: no >6k fizz
+    Biquad snapHp; snapHp.setHighpass(4000.0, 0.707, sr);    // top-end snap definition
+    Biquad distHp; distHp.setHighpass(220.0, 0.707, sr);     // parallel grit stays off lows
+    // Output EQ: roll off subsonics <50 Hz, bump ~100 Hz weight and ~5 kHz click.
+    Biquad eqHp; eqHp.setHighpass(48.0, 0.707, sr);
+    Biquad eqWeight; eqWeight.setPeak(100.0, 0.9, 3.0, sr);
+    Biquad eqClick; eqClick.setPeak(5000.0, 0.8, 3.5, sr);
     WhiteNoise noise(v.seed ^ 0x9911u);
+    WhiteNoise snapN(v.seed ^ 0x4477u);
     DCBlock dc;
-    const double pdrop = std::max(0.004f, pitchMs);
+    const float pDrive = 3.0f + 3.0f * parallelDriveMix;    // grit intensity
     for (size_t n = 0; n < N; ++n) {
         double t = double(n) / sr;
-        double f = endHz + (startHz - endHz) * std::exp(-t / pdrop);
-        // Fundamental sine + short-lived low harmonics (2f-5f, all <= ~250 Hz)
+        double semi = double(pitchDropSemis) * std::exp(-t / tau);
+        double f = root * std::pow(2.0, semi / 12.0);
+        // Fundamental sine + short-lived low harmonics (3f-5f, all <= ~250 Hz)
         // that vanish quickly for a clean sub tail.
         double fund = std::sin(kTwoPi * ph);
-        // Use 3f-5f only: 2f of a ~48 Hz fundamental is still sub. 3f-5f land in
-        // the 140-260 Hz low band, adding clean body without raising sub energy.
         double h3 = std::sin(kTwoPi * 3.0 * ph);
         double h4 = std::sin(kTwoPi * 4.0 * ph);
         double h5 = std::sin(kTwoPi * 5.0 * ph);
@@ -121,12 +146,20 @@ StereoBuffer renderKick(const Recipe& rc, const Voice& v) {
         kph += knockHz / sr; if (kph >= 1.0) kph -= 1.0;
 
         float be = body.tick();
-        float bodyOut = bodyLp.process(float(fund) * be + float(harm) + float(kn));
-        bodyOut = softGlue(bodyOut, drive);
+        float bodyRaw = float(fund) * be + float(harm) + float(kn);
+        float bodyOut = softGlue(bodyLp.process(bodyRaw), drive);
+        // Parallel grit path: HP a copy at 220 Hz, saturate, mix back. The HP
+        // keeps the distortion off the sub so the low end stays clean/tight.
+        float grit = shTanh(distHp.process(bodyRaw), pDrive) * parallelDriveMix;
         // Beater click/knock — 2-6 kHz band-limited noise burst.
         float clk = clickLp.process(clickHp.process(clickBp.process(noise.tick())))
                     * click.tick() * clickAmt;
-        float mono = dc.tick(bodyOut + clk) * v.velocity * gain;
+        // Attack snap — HP'd noise, ultra-short, for transient definition.
+        float snp = snapHp.process(snapN.tick()) * snap.tick() * clickAmount;
+        float mix = bodyOut + grit + clk + snp;
+        mix = eqClick.process(eqWeight.process(eqHp.process(mix)));
+        float mono = dc.tick(mix) * v.velocity * gain;
+        if (!std::isfinite(mono)) mono = 0.0f;
         out.l[n] = mono; out.r[n] = mono;
     }
     return out;
@@ -139,8 +172,10 @@ Recipe makeSnareRecipe(float aggr, float dark, float nov, Rng& rng) {
     auto& p = r.p;
     const auto& dp = rtg::DrumProfile::active();
     const float body = dp.snareBodyHz;                  // ~145 Hz (refs 140-150)
-    // Body fundamental centered on the profile (was 175-235; LOWERED to match).
+    // Body fundamental centered on the profile (legacy key).
     p["bodyHz"]    = rng.rangef(body * 0.95f, body * 1.07f);
+    // Tuned chest-slam BODY: 180-215 Hz sine/triangle burst for tearout punch.
+    p["bodyFreq"]  = rng.rangef(180.0f, 215.0f);
     p["bodyDecay"] = rng.rangef(0.07f, 0.13f);
     // More TONAL: the pitched body dominates (raised mix; noise tail cut below).
     p["bodyMix"]   = rng.rangef(0.55f, 0.80f);
@@ -148,7 +183,14 @@ Recipe makeSnareRecipe(float aggr, float dark, float nov, Rng& rng) {
     const float crackDec = dp.snareCrackDecayMs * 0.001f;  // ~0.11 s
     p["crackHz"]   = rng.rangef(2600.0f, 4200.0f) - dark * 1000.0f;
     p["crackDecay"] = clampf(rng.rangef(crackDec * 0.35f, crackDec * 0.65f), 0.02f, 0.09f);
-    p["crackAmt"]  = rng.rangef(0.9f, 1.3f);
+    p["crackAmt"]  = rng.rangef(0.9f, 1.3f);                    // legacy key
+    p["crackAmount"] = rng.rangef(1.0f, 1.4f) + aggr * 0.3f;    // hot 2-5k crack
+    // Transient boost: ultra-short HP'd noise snap for a cracky onset.
+    p["transientBoost"] = rng.rangef(0.4f, 0.8f) + aggr * 0.4f;
+    // OTT-lite glue (expansive/chest-slam) + short plate tail (<200 ms).
+    p["ott"]       = rng.rangef(0.28f, 0.45f);
+    p["roomAmt"]   = rng.rangef(0.09f, 0.16f);
+    p["roomMs"]    = rng.rangef(0.06f, 0.11f);
     // Tail: HP'd noise with a falling LP — reduced ~6 dB for a tonal, low-noise
     // snare (was 0.35-0.55; halved so the pitched body/crack dominate).
     p["tailDecay"] = rng.rangef(0.14f, 0.30f);
@@ -165,52 +207,79 @@ StereoBuffer renderSnare(const Recipe& rc, const Voice& v) {
     const size_t N = drumLen(v);
     StereoBuffer out(N);
     const double sr = v.sr;
-    const float bodyHz = rc.get("bodyHz", 205.0f);
+    const float bodyFreq = rc.get("bodyFreq", rc.get("bodyHz", 200.0f));  // tuned body
     const float bodyDecay = rc.get("bodyDecay", 0.085f);
     const float bodyMix = rc.get("bodyMix", 0.4f);
     const float crackHz = rc.get("crackHz", 3400.0f);
     const float crackDecay = rc.get("crackDecay", 0.01f);
-    const float crackAmt = rc.get("crackAmt", 1.1f);
+    const float crackAmount = rc.get("crackAmount", rc.get("crackAmt", 1.1f));
+    const float transientBoost = rc.get("transientBoost", 0.6f);
     const float tailDecay = rc.get("tailDecay", 0.22f);
     const float tailHp = rc.get("tailHp", 1800.0f);
     const float tailLp0 = rc.get("tailLp0", 8000.0f);
     const float tailAmt = rc.get("tailAmt", 0.45f);
+    const float ottAmt = clampf(rc.get("ott", 0.35f), 0.0f, 1.0f);
+    const float roomAmt = clampf(rc.get("roomAmt", 0.13f), 0.0f, 0.6f);
+    const float roomMs = clampf(rc.get("roomMs", 0.09f), 0.03f, 0.19f);
     const float metal = rc.get("metal", 0.0f);
     const float gain = rc.get("gain", 0.7f);
     const float vel = clampf(v.velocity, 0.05f, 1.0f);
 
     double ph1 = 0, ph2 = 0;
     // Velocity rides crack level (harder = snappier) and tail length.
-    const float crackLevel = crackAmt * (0.55f + 0.45f * vel);
+    const float crackLevel = crackAmount * (0.55f + 0.45f * vel);
     const float tDecay = tailDecay * (0.6f + 0.4f * vel);
     EnvAD body;  body.start(0.0009f, bodyDecay, sr);
     EnvAD crack; crack.start(0.0003f, crackDecay, sr);
     EnvAD tail;  tail.start(0.0015f, tDecay, sr);
+    EnvAD snap;  snap.start(0.00005f, 0.004f, sr);          // transient-boost snap
+    EnvAD roomEnv; roomEnv.start(0.002f, roomMs, sr);       // hard-caps tail <200 ms
     Biquad crackBpL, crackBpR;
     crackBpL.setBandpass(crackHz, 1.4, sr); crackBpR.setBandpass(crackHz, 1.4, sr);
     Biquad tailHpL, tailHpR;
     tailHpL.setHighpass(tailHp, 0.707, sr); tailHpR.setHighpass(tailHp, 0.707, sr);
+    Biquad snapHpL, snapHpR;
+    snapHpL.setHighpass(3500.0, 0.707, sr); snapHpR.setHighpass(3500.0, 0.707, sr);
     // Falling LP on the tail (SVF, cutoff modulated by the tail envelope).
     SVF tailLpL, tailLpR;
     const double tailLpEnd = 2600.0;
     WhiteNoise nCrackL(v.seed ^ 0x5533u), nCrackR(v.seed ^ 0xA1B2u);
     WhiteNoise nTailL(v.seed ^ 0x7788u), nTailR(v.seed ^ 0xC4D5u);
+    WhiteNoise nSnapL(v.seed ^ 0x2A2Au), nSnapR(v.seed ^ 0x9E9Eu);
     Comb metalComb; metalComb.fb = 0.6f; metalComb.damp = 0.25f;
     metalComb.setMaxDelay(int(sr / 300.0) + 8);
+    // Short plate/room: two low-feedback combs + allpass diffusion per channel,
+    // gated by roomEnv so the tail is a snappy slam, never a wash.
+    Comb roomL1, roomL2, roomR1, roomR2;
+    Comb* rooms[4] = {&roomL1, &roomL2, &roomR1, &roomR2};
+    for (int i = 0; i < 4; ++i) {
+        rooms[i]->fb = 0.45f; rooms[i]->damp = 0.4f;
+        rooms[i]->setMaxDelay(int(sr * 0.030) + 8);
+    }
+    Allpass1 apL, apR; apL.setCoef(2200.0, sr); apR.setCoef(1900.0, sr);
+    const float dL1 = float(sr * 0.0197), dL2 = float(sr * 0.0263);
+    const float dR1 = float(sr * 0.0223), dR2 = float(sr * 0.0291);
+    // OTT-lite glue per channel (chest-slam expansion).
+    OTTLite ottL, ottR; ottL.set(sr, ottAmt); ottR.set(sr, ottAmt);
     DCBlock dcL, dcR;
     int cc = 0;
     float lpCut = tailLp0;
     for (size_t n = 0; n < N; ++n) {
-        // --- tuned body (thump): fundamental + detuned partner.
+        // --- tuned body (chest slam): fundamental + detuned partner.
         double b = std::sin(kTwoPi * ph1) * 0.7 + std::sin(kTwoPi * ph2) * 0.3;
-        ph1 += bodyHz / sr; if (ph1 >= 1.0) ph1 -= 1.0;
-        ph2 += bodyHz * 1.5 / sr; if (ph2 >= 1.0) ph2 -= 1.0;
+        ph1 += bodyFreq / sr; if (ph1 >= 1.0) ph1 -= 1.0;
+        ph2 += bodyFreq * 1.5 / sr; if (ph2 >= 1.0) ph2 -= 1.0;
         float bodyOut = float(b) * body.tick() * bodyMix;
 
-        // --- crack transient (hot, short band-pass noise).
+        // --- crack transient (hot, short band-pass noise 2-5 kHz).
         float ce = crack.tick() * crackLevel;
         float crL = crackBpL.process(nCrackL.tick()) * ce;
         float crR = crackBpR.process(nCrackR.tick()) * ce;
+
+        // --- transient boost: ultra-short HP'd noise snap for a cracky onset.
+        float se = snap.tick() * transientBoost;
+        float snL = snapHpL.process(nSnapL.tick()) * se;
+        float snR = snapHpR.process(nSnapR.tick()) * se;
 
         // --- tail (HP'd noise, falling LP).
         float te = tail.tick();
@@ -219,14 +288,25 @@ StereoBuffer renderSnare(const Recipe& rc, const Voice& v) {
         tailLpL.process(tailHpL.process(nTailL.tick())); float tL = float(tailLpL.lp) * te * tailAmt;
         tailLpR.process(tailHpR.process(nTailR.tick())); float tR = float(tailLpR.lp) * te * tailAmt;
 
-        float l = bodyOut + crL + tL;
-        float r = bodyOut + crR + tR;
+        float dryL = bodyOut + crL + snL + tL;
+        float dryR = bodyOut + crR + snR + tR;
         if (metal > 0.0f) {
             float m = metalComb.process(crL, float(sr / 340.0)) * te * metal * 0.35f;
-            l += m; r += m;
+            dryL += m; dryR += m;
         }
-        out.l[n] = dcL.tick(l) * vel * gain;
-        out.r[n] = dcR.tick(r) * vel * gain;
+        // Short plate tail fed by the transient content, gated hard by roomEnv.
+        float re = roomEnv.tick();
+        float roomInL = crL + bodyOut, roomInR = crR + bodyOut;
+        float wL = apL.process(0.5f * (roomL1.process(roomInL, dL1) + roomL2.process(roomInL, dL2)));
+        float wR = apR.process(0.5f * (roomR1.process(roomInR, dR1) + roomR2.process(roomInR, dR2)));
+        // OTT-lite glue on the dry slam, then add the short room.
+        float l = ottL.process(dryL) + wL * re * roomAmt;
+        float r = ottR.process(dryR) + wR * re * roomAmt;
+        l = dcL.tick(l) * vel * gain;
+        r = dcR.tick(r) * vel * gain;
+        if (!std::isfinite(l)) l = 0.0f;
+        if (!std::isfinite(r)) r = 0.0f;
+        out.l[n] = l; out.r[n] = r;
     }
     return out;
 }

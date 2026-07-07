@@ -38,10 +38,10 @@ Recipe makeGrowlRecipe(float aggr, float dark, float nov, Rng& rng) {
     p["fmIndex"]      = 2.0f + aggr * 8.0f + rng.rangef(-1.0f, 1.0f) * (1.0f + nov * 2.5f);
     p["fmDecay"]      = rng.rangef(0.05f, 0.16f);
     p["fmFeedback"]   = rng.rangef(0.0f, 0.5f) * (0.5f + aggr);
-    p["carMix"]       = rng.rangef(0.15f, 0.4f);    // analog square leads over FM sine
-    p["srcMorph"]     = rng.rangef(0.35f, 0.6f);    // bias to square-center of saw->square->pulse
+    p["carMix"]       = rng.rangef(0.10f, 0.28f);   // keep LOW: analog square LEADS the FM sine
+    p["srcMorph"]     = clampf(0.5f + rng.rangef(-0.06f, 0.06f), 0.4f, 0.6f); // lock to square center
     p["pulseWidth"]   = rng.rangef(0.2f, 0.5f);
-    p["pmAmt"]        = rng.rangef(0.08f, 0.45f) * (0.6f + aggr); // FM the square carrier -> metal
+    p["pmAmt"]        = rng.rangef(0.15f, 0.5f) * (0.7f + aggr * 1.4f); // FM->square: metallic bite, scales w/ aggr
     p["pwmRate"]      = rng.rangef(0.15f, 0.8f);    // slow pulse-width movement
     p["pwmDepth"]     = rng.rangef(0.05f, 0.2f);
     p["unison"]       = float(rng.intRange(1, 3));
@@ -51,15 +51,23 @@ Recipe makeGrowlRecipe(float aggr, float dark, float nov, Rng& rng) {
     p["gritBits"]     = rng.rangef(6.0f, 12.0f);
     p["gritMix"]      = clampf(rng.rangef(0.25f, 0.7f) * (0.5f + aggr), 0.0f, 1.0f);
     // --- tempo-synced amplitude gate (the "wub") ---
+    // Tearout STOMP gate: bias straight EIGHTHS (gateDiv=2 ~= 4.8 Hz at 145 BPM,
+    // the hard "wob-wob" stomp), NOT frantic 16ths — deep, square-dominant.
     static const float gateDivs[] = {2.0f, 3.0f, 4.0f, 6.0f}; // 8ths / 8th-trips / 16ths / sextuplets
-    p["gateDiv"]      = gateDivs[rng.intRange(0, 3)];
-    p["gateDepth"]    = rng.rangef(0.45f, 0.85f);
-    p["gateShape"]    = (rng.uniform() < 0.5) ? 4.0f : 5.0f;   // 4 square, 5 stepped S&H
+    int   gdAlt       = rng.intRange(0, 3);                    // drawn unconditionally (determinism)
+    p["gateDiv"]      = (rng.uniform() < 0.7f) ? 2.0f : gateDivs[gdAlt];  // bias eighth-note stomp
+    p["gateDepth"]    = clampf(0.72f + aggr * 0.2f + rng.rangef(0.0f, 0.08f), 0.45f, 0.95f); // deep stomp
+    p["gateShape"]    = (rng.uniform() < 0.85f) ? 4.0f : 5.0f; // 4 square (hard stomp), 5 stepped S&H
     // --- distortion staging ---
-    p["drivePre"]     = 1.6f + aggr * 2.6f + rng.rangef(-0.2f, 0.5f);
+    // Serial stacked distortion is the CORE of tearout: pre-tanh -> post tanh/fold
+    // blend (wsMix, high) -> wavefold (foldMix, heavy) -> 2nd "dirty" tanh
+    // (dirtyDrive/dirtyMix). All bounded/normalised so it stays gnarly, not louder.
+    p["drivePre"]     = 1.8f + aggr * 2.8f + rng.rangef(-0.2f, 0.5f);
     p["mudDb"]        = -(2.0f + rng.rangef(0.0f, 4.0f));   // ~300 Hz dip
-    p["drivePost"]    = 1.2f + aggr * 2.2f;
-    p["wsMix"]        = clampf(aggr * 0.7f + rng.rangef(-0.1f, 0.2f), 0.0f, 1.0f);
+    p["drivePost"]    = 1.4f + aggr * 2.6f;
+    p["wsMix"]        = clampf(0.28f + aggr * 0.28f + rng.rangef(-0.05f, 0.10f), 0.0f, 1.0f); // tanh-leaning (keep SQUARE/odd; fold adds even)
+    p["dirtyDrive"]   = 2.2f + aggr * 3.2f + rng.rangef(-0.2f, 0.4f);  // 2nd serial tanh drive (post-fold)
+    p["dirtyMix"]     = clampf(0.15f + aggr * 0.55f + rng.rangef(-0.04f, 0.1f), 0.0f, 0.85f); // tamer@low aggr
     // --- formant / vowel bank (the talk) ---
     // Bias vowel choice toward the bright, high-F2 vowels (E/I) so the vocal
     // energy centres in the 600-2500 Hz presence lane, not the mud below.
@@ -67,8 +75,8 @@ Recipe makeGrowlRecipe(float aggr, float dark, float nov, Rng& rng) {
     p["vowel0"] = v0; p["vowel1"] = v1; p["vowel2"] = v2;
     p["formantQ"]     = rng.rangef(5.0f, 11.0f);
     p["formantMix"]   = rng.rangef(0.62f, 0.90f);   // formant (up-shifted) over low body
-    p["formantGain"]  = rng.rangef(2.2f, 3.4f);
-    p["formantShift"] = rng.rangef(1.20f, 1.45f);   // octave-scale formants UP into presence
+    p["formantGain"]  = rng.rangef(2.4f, 3.6f) + aggr * 0.4f;   // scream harder w/ aggr
+    p["formantShift"] = clampf(rng.rangef(1.25f, 1.45f) + aggr * 0.05f, 1.2f, 1.5f); // octave-up scream
     p["morphBase"]    = rng.rangef(0.05f, 0.35f);
     p["morphMod"]     = rng.rangef(0.45f, 0.75f);   // note.mod influence
     // --- rhythmic modulation ---
@@ -84,21 +92,22 @@ Recipe makeGrowlRecipe(float aggr, float dark, float nov, Rng& rng) {
     // the low-mid mud; the sub lane owns everything below. Presence peak pushed
     // harder and centred in the 950-1800 Hz vocal band.
     p["hpFreq"]       = rng.rangef(125.0f, 155.0f);
-    p["midGainDb"]    = rng.rangef(4.5f, 8.5f);
-    p["midFreq"]      = rng.rangef(950.0f, 1800.0f);
+    p["midGainDb"]    = rng.rangef(5.0f, 8.5f) + aggr * 2.0f;   // scream the 1-3 kHz aggression lane
+    p["midFreq"]      = rng.rangef(1100.0f, 2000.0f);          // centre the scream in 1-3 kHz
     p["highShelfDb"]  = 3.0f - dark * 9.0f;
     p["ottAmt"]       = rng.rangef(0.15f, 0.4f);
     // --- movement polish ---
     p["phaserRate"]   = rng.rangef(0.2f, 1.2f);
     p["phaserMix"]    = rng.rangef(0.15f, 0.4f);
     p["width"]        = 0.08f + nov * 0.18f;
-    p["ampAtk"]       = rng.rangef(0.004f, 0.016f);
+    // Fast attack so each stab CRACKS like a percussive hit; faster w/ aggr.
+    p["ampAtk"]       = clampf(0.003f - aggr * 0.0018f + rng.rangef(-0.0004f, 0.0012f), 0.0008f, 0.005f);
     p["ampRel"]       = rng.rangef(0.008f, 0.022f);
     p["gain"]         = 0.6f;
     // --- wavefolder ("tearout" bark): 2x-oversampled, blend-controlled, low ---
-    p["foldDrive"]    = rng.rangef(1.2f, 2.4f);       // pre-fold gain (1..3)
-    p["foldMix"]      = rng.rangef(0.05f, 0.28f);     // conservative wet blend
-    p["foldPre"]      = (rng.uniform() < 0.5) ? 1.0f : 0.0f; // pre/post-formant
+    p["foldDrive"]    = 1.4f + aggr * 1.5f + rng.rangef(-0.1f, 0.3f);  // harder pre-fold gain, scales w/ aggr
+    p["foldMix"]      = clampf(0.10f + aggr * 0.16f + rng.rangef(-0.03f, 0.06f), 0.04f, 0.5f); // lighter fold: less even-harmonic, stays square
+    p["foldPre"]      = (rng.uniform() < 0.25f) ? 1.0f : 0.0f; // bias POST-formant so fold+dirty stack serially
     // --- swept comb-notch ("watery" moving notches): feed-forward, low mix ---
     p["combMix"]      = rng.rangef(0.04f, 0.22f);     // conservative wet blend
     p["combG"]        = rng.rangef(0.3f, 0.7f);       // feed-forward gain (<0.9)
@@ -199,8 +208,15 @@ StereoBuffer renderGrowl(const Recipe& rc, const Voice& v) {
     const float gain         = rc.get("gain", 0.6f);
     // Wavefolder (defaults keep the stage OFF so legacy recipes are unchanged).
     const float foldDrive    = clampf(rc.get("foldDrive", 1.6f), 1.0f, 4.0f);
-    const float foldMix      = clampf(rc.get("foldMix", 0.0f), 0.0f, 0.5f);
+    const float foldMix      = clampf(rc.get("foldMix", 0.0f), 0.0f, 0.6f);
     const bool  foldPre      = rc.get("foldPre", 0.0f) > 0.5f;
+    // Second serial "dirty" tanh stage stacked AFTER the wavefold (Serum
+    // "Sine-Fold -> Dirty" order). Symmetric tanh => ODD harmonics (square-ness).
+    // Peak-normalised by 1/tanh(drive) so it stays bounded (no level blow-up).
+    // dirtyMix default 0 keeps the stage OFF for legacy recipes.
+    const float dirtyDrive   = clampf(rc.get("dirtyDrive", 3.0f), 1.0f, 8.0f);
+    const float dirtyMix     = clampf(rc.get("dirtyMix", 0.0f), 0.0f, 0.9f);
+    const float dirtyNorm    = 1.0f / std::max(0.2f, std::tanh(dirtyDrive));
     // Swept comb-notch (defaults keep the stage OFF for legacy recipes).
     const float combMix      = clampf(rc.get("combMix", 0.0f), 0.0f, 0.4f);
     const float combG        = clampf(rc.get("combG", 0.5f), 0.0f, 0.85f);
@@ -353,6 +369,14 @@ StereoBuffer renderGrowl(const Recipe& rc, const Voice& v) {
             post = lerpf(post, folded, foldMix);
         }
 
+        // --- second serial "dirty" tanh stage (tearout distortion stack) ---
+        // Stacked AFTER the wavefold. Symmetric (odd-harmonic) drive, peak-normalised
+        // so |out| <= 1 (bounded). `post` is already in [-1,1] entering here.
+        if (dirtyMix > 0.0f) {
+            float d = std::tanh(post * dirtyDrive) * dirtyNorm;
+            post = lerpf(post, d, dirtyMix);
+        }
+
         // --- bitcrush / sample-rate reduction grit (robotic "talk") ---
         // Rhythmic LFO nudges the hold rate so grit interacts with the gate.
         // NOT oversampled: the aliasing IS the effect. post is bounded [-1,1] here.
@@ -421,18 +445,20 @@ Recipe makeScreechRecipe(float aggr, float dark, float nov, Rng& rng) {
     Recipe r; r.role = Role::Screech; r.seed = rng.next();
     r.name = hexName("screech", rng);
     auto& p = r.p;
-    p["fmRatio"]      = rng.rangef(3.0f, 8.0f);
-    p["fmIndex"]      = 3.0f + aggr * 6.0f + nov * 3.0f;
+    p["fmRatio"]      = rng.rangef(3.5f, 9.0f);
+    p["fmIndex"]      = 4.0f + aggr * 8.0f + nov * 3.0f;   // more FM index -> metallic scream
     p["fmDecay"]      = rng.rangef(0.08f, 0.3f);
-    p["foldDrive"]    = 1.2f + aggr * 2.0f;
+    p["foldDrive"]    = 1.5f + aggr * 3.0f;                // harder fold
+    p["dirtyDrive"]   = 2.0f + aggr * 3.0f;                // 2nd serial tanh (metallic)
+    p["dirtyMix"]     = clampf(0.25f + aggr * 0.5f, 0.0f, 0.85f);
     p["hpFreq"]       = rng.rangef(320.0f, 480.0f);
     // formant scream (higher octave than growl)
     float v0, v1, v2; pickVowelPath(rng, v0, v1, v2);
     p["vowel0"] = v0; p["vowel1"] = v1; p["vowel2"] = v2;
-    p["formantOct"]   = rng.rangef(1.6f, 2.3f);
+    p["formantOct"]   = rng.rangef(1.7f, 2.4f) + aggr * 0.1f;   // octave-up scream, higher w/ aggr
     p["formantQ"]     = rng.rangef(5.0f, 10.0f);
     p["formantMix"]   = rng.rangef(0.5f, 0.8f);
-    p["formantGain"]  = rng.rangef(2.0f, 3.0f);
+    p["formantGain"]  = rng.rangef(2.2f, 3.2f) + aggr * 0.3f;
     p["morphBase"]    = rng.rangef(0.05f, 0.35f);
     p["morphMod"]     = rng.rangef(0.45f, 0.75f);
     p["lfoRate"]      = rng.rangef(2.0f, 9.0f);
@@ -459,6 +485,10 @@ StereoBuffer renderScreech(const Recipe& rc, const Voice& v) {
     const float index = rc.get("fmIndex", 6.0f);
     const float fmDecay = rc.get("fmDecay", 0.15f);
     const float foldDrive = rc.get("foldDrive", 2.0f);
+    // Second serial "dirty" tanh stage (metallic tearout). dirtyMix 0 => legacy off.
+    const float dirtyDrive = clampf(rc.get("dirtyDrive", 2.0f), 1.0f, 6.0f);
+    const float dirtyMix   = clampf(rc.get("dirtyMix", 0.0f), 0.0f, 0.9f);
+    const float dirtyNorm  = 1.0f / std::max(0.3f, std::tanh(dirtyDrive));
     const float hpFreq = rc.get("hpFreq", 400.0f);
     const int   vowel0 = int(rc.get("vowel0", 0.0f));
     const int   vowel1 = int(rc.get("vowel1", 2.0f));
@@ -512,6 +542,11 @@ StereoBuffer renderScreech(const Recipe& rc, const Voice& v) {
         modPh += freq * ratio / sr; if (modPh >= 1.0) modPh -= 1.0;
 
         float s = shFold(float(c) * foldDrive);
+        // second serial dirty tanh (odd-harmonic metallic stack), bounded/normalised.
+        if (dirtyMix > 0.0f) {
+            float d = std::tanh(s * dirtyDrive) * dirtyNorm;
+            s = lerpf(s, d, dirtyMix);
+        }
         s = hp.process(s);
         s = comb.process(s, float(sr / combFreq));
 

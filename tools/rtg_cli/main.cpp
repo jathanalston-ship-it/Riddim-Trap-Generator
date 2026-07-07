@@ -27,6 +27,7 @@
 #include <string>
 #include <vector>
 #include "rtg/decision/calibration.h"
+#include "rtg/library/ab_log.h"
 #include "rtg/generation/pipeline.h"
 #include "rtg/library/evolution.h"
 #include "rtg/master/master_engine.h"   // measureLufs
@@ -163,6 +164,8 @@ int main(int argc, char** argv) {
     bool genreGiven = false;
     bool libGiven = false;
     int evolveCycles = 0;
+    std::string abSummary;   // --ab-summary <ab_drops.jsonl>: analyze A/B drop tests
+    int abLast = 0;          // --ab-last <N>: only the most recent N tests (0 = all)
 
     auto arg = [&](int& i) -> std::string {
         return (i + 1 < argc) ? std::string(argv[++i]) : std::string();
@@ -175,6 +178,8 @@ int main(int argc, char** argv) {
         else if (a == "--calib-out") calibOut = arg(i);
         else if (a == "--calibration") calibrationIn = arg(i);
         else if (a == "--evolve") evolveCycles = std::atoi(arg(i).c_str());
+        else if (a == "--ab-summary") abSummary = arg(i);
+        else if (a == "--ab-last") abLast = std::atoi(arg(i).c_str());
         else if (a == "--genre") { params.genre = (arg(i) == "trap") ? Genre::Trap : Genre::Riddim; genreGiven = true; }
         else if (a == "--bpm") params.bpm = std::atof(arg(i).c_str());
         else if (a == "--seconds") params.lengthSec = std::atof(arg(i).c_str());
@@ -207,6 +212,18 @@ int main(int argc, char** argv) {
     // ---- Background library evolution mode --------------------------------
     if (evolveCycles > 0) {
         return runEvolve(libDir, evolveCycles);
+    }
+
+    // ---- A/B drop-test preference summary ---------------------------------
+    // Reads the global A/B drop log and prints the mean winner-minus-loser
+    // deltas per design param / measured feature — the analysis behind
+    // "look at the last N A/B tests and overhaul song design".
+    if (!abSummary.empty()) {
+        std::vector<rtg::ABResult> results = rtg::abLogLoad(abSummary);
+        rtg::ABSummary s = rtg::abLogSummarize(results, abLast);
+        std::printf("[rtg] %zu A/B drop test(s) in %s\n", results.size(), abSummary.c_str());
+        std::printf("%s", s.text.c_str());
+        return 0;
     }
 
     // ---- Generation mode --------------------------------------------------

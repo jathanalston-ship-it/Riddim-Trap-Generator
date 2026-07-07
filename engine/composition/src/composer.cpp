@@ -46,6 +46,23 @@ const Archetype kRiddim12Bank[] = {
 };
 constexpr int kRiddim12BankN = int(sizeof(kRiddim12Bank) / sizeof(kRiddim12Bank[0]));
 
+// HARD TEAROUT riddim bank — dense, on-grid straight-16th patterns anchored on
+// the DOWNBEAT (step 0 always 'X') and emphasizing beats 1/2/3/4 (steps 0/4/8/
+// 12). No negative space around the kick: the bass STOMPS locked with kick+sub
+// instead of answering around them. Used for riddim DROPS, blended toward with
+// aggression. No swing/triplet — these read as machine-gun square-wave stomps.
+const Archetype kTearout16Bank[] = {
+    // Sparse, HARD stomps on the strong beats — each sustained stab is chopped
+    // into the eighth-note "wob" by the growl's gate, so the pattern itself
+    // stays spaced (hard hits), not a busy machine-gun of onsets.
+    { "X...X...X...X...", 1.5 }, // pure quarter stomp (hardest, most spaced)
+    { "X...X...X...X..X", 1.3 }, // quarter stomp + lead-in pickup
+    { "X..XX...X..XX...", 1.0 }, // stomp pairs on 1 & 3
+    { "X...X..XX...X..X", 0.9 }, // stomp with a double tail
+    { "X.XXX.XXX.XXX.XX", 0.4 }, // occasional machine-gun burst (rare variation)
+};
+constexpr int kTearout16BankN = int(sizeof(kTearout16Bank) / sizeof(kTearout16Bank[0]));
+
 // Trap 808 skeletons (1/8 grid). Sparse-long families plus rolling and
 // glide-chain shapes; behavior (note length / gliding) is chosen per drop.
 const Archetype kEightOhEightBank[] = {
@@ -72,6 +89,7 @@ struct Comp {
     // ---- Per-track "feel" (seeded once, so two seeds swing differently). ----
     float humScale = 1.0f;   // velocity-jitter scale (tight ~0.6, loose ~1.5)
     float humTime = 0.0f;    // timing-jitter amount in beats (loose grooves drift)
+    float humTimeMul = 1.0f; // temporary timing-drift scale (riddim drops tighten it)
     int   melodyReg = 0;     // extra register offset for motif placement
     int   breakProg = 0;     // which break/pad chord progression (0..3)
     bool  introRampExp = false; // intro energy ramp shape (linear vs exponential)
@@ -108,8 +126,9 @@ struct Comp {
 
     // Timing humanization: nudge an off-grid event by the track's feel amount.
     double mt(Rng& r, double t) {
-        if (humTime <= 0.0f) return t;
-        return std::max(0.0, t + double(r.gaussian()) * double(humTime));
+        const float ht = humTime * humTimeMul;
+        if (ht <= 0.0f) return t;
+        return std::max(0.0, t + double(r.gaussian()) * double(ht));
     }
 
     // Bass pitch helpers (semitone offsets from mid-bass root).
@@ -222,15 +241,35 @@ void Comp::addBass(const Section& s, Rng& r, int skipFirstBar) {
     // BassA = call voice (even bars), BassB = response voice (odd bars, an
     // answered/mutated variant). Staccato stabs, growl "talk" via `mod`,
     // per-pattern swing for the bounce, negative space around beats 1 & 3.
-    const bool triplet = r.chance(0.22 + 0.18 * plan.chaos01);
-    const Archetype* bank = triplet ? kRiddim12Bank : kRiddim16Bank;
-    const int bankN       = triplet ? kRiddim12BankN : kRiddim16BankN;
+    // HARD TEAROUT mode: on riddim DROPS we kill the reggaeton bounce and stomp
+    // ON the grid, scaling intensity with aggression. Other riddim sections
+    // (e.g. the Impact-intro teaser) keep the classic swung/answering feel, so
+    // all their RNG draws below stay in their original order (identical output).
+    const bool tearout = (s.type == SectionType::Drop);
+    const double agg = double(plan.aggression01);
+
+    // TRIPLET feel: kept for classic riddim, but forced OFF on tearout unless
+    // aggression is genuinely low AND chaos is high (a rare shuffled tearout).
+    const bool triplet0 = r.chance(0.22 + 0.18 * plan.chaos01);
+    const bool triplet = tearout ? (triplet0 && agg < 0.5 && plan.chaos01 > 0.5f)
+                                 : triplet0;
+
+    // Bank: triplet -> 12-step; else blend toward the dense downbeat-anchored
+    // TEAROUT bank as aggression rises (only draws in tearout, so non-drop
+    // riddim keeps its exact original draw order). Otherwise the classic bank.
+    const Archetype* bank; int bankN;
+    if (triplet) { bank = kRiddim12Bank; bankN = kRiddim12BankN; }
+    else if (tearout && r.chance(0.35 + 0.65 * agg)) { bank = kTearout16Bank; bankN = kTearout16BankN; }
+    else { bank = kRiddim16Bank; bankN = kRiddim16BankN; }
     const int steps       = triplet ? 12 : 16;
     const double stepBeats = BPB / double(steps); // 0.25 (1/16) or 1/3 (triplet)
 
     // Per-pattern SWING (~55-68%): delay the off (odd) steps by a fraction of a
     // step to get the shuffle/triplet "bounce". Small, never overlaps the grid.
-    const double swing = r.range(0.55, 0.68);
+    // On tearout we force it STRAIGHT: lerp(0.53, 0.50, aggression) — dead-flat
+    // at high aggression, barely-there at low (the stomp must land on the grid).
+    double swing = r.range(0.55, 0.68);
+    if (tearout) swing = 0.53 + (0.50 - 0.53) * agg;
     const double swingDelay = stepBeats * (2.0 * swing - 1.0);
 
     std::vector<double> w;
@@ -265,7 +304,9 @@ void Comp::addBass(const Section& s, Rng& r, int skipFirstBar) {
                 if (r.chance(0.30)) pat[i] = (pat[i] == 'X') ? '.' : 'X';
             pat[steps - 1] = 'X'; // lead-in pickup
         }
-        pat[0] = '.'; // keep the kick's downbeat clear — bass answers just after
+        // Downbeat: classic riddim clears it so the bass answers AROUND the
+        // kick; tearout STOMPS on beat 1 locked with the kick+sub (the stomp).
+        pat[0] = tearout ? 'X' : '.';
 
         // Precompute stab (step, start-time) pairs so lengths can be clamped to
         // the actual next onset — guarantees staccato, no overlapping starts.
@@ -309,7 +350,9 @@ void Comp::addBass(const Section& s, Rng& r, int skipFirstBar) {
             artic = std::min(1.0f, artic * (0.65f + 0.6f * pal.aggression01));
             ++stabCounter;
 
-            float vel = hvel(r, callBar ? 0.90f : 0.82f);
+            float velBase = callBar ? 0.90f : 0.82f;
+            if (tearout) velBase = std::min(1.0f, velBase + 0.08f * float(agg));
+            float vel = hvel(r, velBase);
             add(lane, t, len, midi, vel, artic);
         }
 
@@ -328,12 +371,26 @@ void Comp::addBass(const Section& s, Rng& r, int skipFirstBar) {
 void Comp::addSubFollow(const Section& s, int skipFirstBar) {
     if (!riddim) return; // trap: 808 covers the sub, leave Sub empty
     const double base = s.startBar * BPB;
+    // Tearout: on hard riddim drops the Sub STOMPS in lockstep with the bass +
+    // kick — short, punchy mono-root hits on beats 1/2/3/4 instead of a long
+    // held root. Blended in by aggression; classic held sub below that.
+    const bool tearout = (s.type == SectionType::Drop) && (plan.aggression01 >= 0.5f);
+    const double agg = double(plan.aggression01);
     for (int b = 0; b < s.bars; ++b) {
         if (b < skipFirstBar) continue;
-        // Root on the bar downbeat, held into the halftime pocket.
-        add(Lane::Sub, base + b * BPB, 1.5, rootSub, 0.95f, 0.2f);
-        // Occasional mid-bar sub reinforcement.
-        add(Lane::Sub, base + b * BPB + 2.0, 1.0, rootSub, 0.85f, 0.2f);
+        if (tearout) {
+            // Length shrinks as aggression rises → tighter, more staccato stomp.
+            const double slen = 0.55 - 0.25 * agg; // ~0.30 (hard) .. 0.45
+            for (int beat = 0; beat < 4; ++beat) {
+                const float v = (beat == 0) ? 0.98f : (beat == 2 ? 0.90f : 0.82f);
+                add(Lane::Sub, base + b * BPB + beat, slen, rootSub, v, 0.15f);
+            }
+        } else {
+            // Root on the bar downbeat, held into the halftime pocket.
+            add(Lane::Sub, base + b * BPB, 1.5, rootSub, 0.95f, 0.2f);
+            // Occasional mid-bar sub reinforcement.
+            add(Lane::Sub, base + b * BPB + 2.0, 1.0, rootSub, 0.85f, 0.2f);
+        }
     }
 }
 
@@ -350,6 +407,16 @@ void Comp::addDrums(const Section& s, Rng& r, float density, bool withSnare,
         // Kick.
         if (riddim) {
             add(Lane::Kick, bb + 0.0, 0.5, rootSub, hvel(r, 1.0f, 0.05f));
+            // TEAROUT "whack": on hard drops, lock quieter reinforcement kicks on
+            // beats 2 & 4 (offsets 1.0/3.0 — clear of the beat-3 snare) under the
+            // bass+sub quarter stomps. Frequency scales with aggression/density.
+            if (s.type == SectionType::Drop) {
+                const double agg = double(plan.aggression01);
+                if (r.chance(0.45 + 0.5 * agg * double(density))) {
+                    add(Lane::Kick, bb + 1.0, 0.28, rootSub, hvel(r, 0.60f, 0.04f));
+                    add(Lane::Kick, bb + 3.0, 0.28, rootSub, hvel(r, 0.58f, 0.04f));
+                }
+            }
             // Complexity-scaled pickup before the next bar.
             if (r.chance(0.25 * plan.complexity01 * density))
                 add(Lane::Kick, bb + 3.5, 0.25, rootSub, hvel(r, 0.7f, 0.05f));
@@ -967,10 +1034,17 @@ void Comp::composeDrop(const Section& s, int idx, Rng& r) {
     if (r.chance(0.5))
         add(Lane::Downlifter, entry, 1.5, plan.rootMidi + 30, 0.7f, 0.8f);
 
-    // Full bass + drums.
+    // Full bass + drums. TEAROUT: tighten timing drift toward 0 as aggression
+    // rises so the stomp stays LOCKED (bass stabs are already grid-exact; this
+    // also tightens the drop's hats). Restored right after so the melody/motif
+    // and every other section keep their normal humanized feel. Riddim only —
+    // trap drops are untouched.
+    const float savedHumMul = humTimeMul;
+    if (riddim) humTimeMul = std::max(0.0f, 1.0f - 0.9f * plan.aggression01);
     addBass(s, r, skip);
     addSubFollow(s, skip);
     addDrums(s, r, 0.9f, true, true, s.startBar + skip, s.bars - skip);
+    humTimeMul = savedHumMul;
 
     // Melody stabs shadowing the drop when the budget allows.
     if (plan.melody01 > 0.5f)
