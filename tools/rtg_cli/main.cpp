@@ -160,7 +160,7 @@ int main(int argc, char** argv) {
     Params params;
     std::string out = "rtg_track.wav";
     std::string libDir = "rtg_library";
-    std::string analyzeRefs, calibOut, calibrationIn;
+    std::string analyzeRefs, calibOut, calibrationIn, stemsDir, scoreOut;
     bool genreGiven = false;
     bool libGiven = false;
     int evolveCycles = 0;
@@ -180,6 +180,8 @@ int main(int argc, char** argv) {
         else if (a == "--evolve") evolveCycles = std::atoi(arg(i).c_str());
         else if (a == "--ab-summary") abSummary = arg(i);
         else if (a == "--ab-last") abLast = std::atoi(arg(i).c_str());
+        else if (a == "--stems") stemsDir = arg(i);
+        else if (a == "--score") scoreOut = arg(i);
         else if (a == "--genre") { params.genre = (arg(i) == "trap") ? Genre::Trap : Genre::Riddim; genreGiven = true; }
         else if (a == "--bpm") params.bpm = std::atof(arg(i).c_str());
         else if (a == "--seconds") params.lengthSec = std::atof(arg(i).c_str());
@@ -251,12 +253,13 @@ int main(int argc, char** argv) {
                 (unsigned long long)params.seed);
 
     std::atomic<bool> cancel{false};
+    std::array<StereoBuffer, kLaneCount> stems;
     auto t0 = std::chrono::steady_clock::now();
     auto result = generateTrack(params, library, cancel,
         [](float p, const std::string& stage) {
             std::printf("[rtg] %3d%%  %s\n", int(p * 100.0f), stage.c_str());
             std::fflush(stdout);
-        });
+        }, /*ingest*/ true, stemsDir.empty() ? nullptr : &stems);
     auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
     if (!result) { std::printf("[rtg] cancelled/failed\n"); return 1; }
@@ -264,6 +267,34 @@ int main(int argc, char** argv) {
     if (!writeWav16(out, result->master, result->sampleRate)) {
         std::printf("[rtg] ERROR: could not write %s\n", out.c_str());
         return 2;
+    }
+
+    // --- per-lane stems (raw, pre-mix) for analysis (earview) ---------------
+    if (!stemsDir.empty()) {
+        std::error_code ec; fs::create_directories(stemsDir, ec);
+        int wrote = 0;
+        for (int li = 0; li < kLaneCount; ++li) {
+            if (stems[li].empty() || stems[li].peak() < 1e-4f) continue;
+            std::string sp = (fs::path(stemsDir) / (std::string("stem_")
+                              + laneName(Lane(li)) + ".wav")).string();
+            if (writeWav16(sp, stems[li], result->sampleRate)) ++wrote;
+        }
+        std::printf("[rtg] wrote %d stem(s) to %s\n", wrote, stemsDir.c_str());
+    }
+
+    // --- symbolic score export (note grid) for the earview overlay ----------
+    if (!scoreOut.empty()) {
+        if (FILE* f = std::fopen(scoreOut.c_str(), "w")) {
+            std::fprintf(f, "# bpm %g beatsPerBar %g totalBeats %g\n", result->plan.bpm,
+                         result->plan.beatsPerBar, result->score.totalBeats);
+            std::fprintf(f, "# lane startBeat lengthBeats midi velocity mod\n");
+            for (int li = 0; li < kLaneCount; ++li)
+                for (const Note& n : result->score.notes(Lane(li)))
+                    std::fprintf(f, "%s %.4f %.4f %d %.3f %.3f\n", laneName(Lane(li)),
+                                 n.startBeat, n.lengthBeats, n.midi, n.velocity, n.mod);
+            std::fclose(f);
+            std::printf("[rtg] wrote score %s\n", scoreOut.c_str());
+        }
     }
 
     const auto& s = result->stats;

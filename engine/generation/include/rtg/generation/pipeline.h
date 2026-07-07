@@ -3,6 +3,7 @@
 // Plan → Compose → Sound selection/synthesis → Render → Mix → Master →
 // Library update, with progress reporting and cooperative cancellation.
 // Implemented in engine/generation/src/.
+#include <array>
 #include <atomic>
 #include <functional>
 #include <optional>
@@ -51,10 +52,13 @@ using ProgressFn = std::function<void(float progress01, const std::string& stage
 /// `ingest` (default true): admit synthesized sounds into `library` and update
 /// usage counts. Pass false for read-only renders (e.g. A/B previews) so the
 /// library snapshot is unchanged and the render is exactly reproducible.
+/// `stemsOut` (optional): if non-null, receives the raw per-lane (pre-mix) audio
+/// for stem analysis/inspection.
 std::optional<GenerationResult> generateTrack(const Params& params,
                                               SoundLibrary& library,
                                               const std::atomic<bool>& cancelFlag,
                                               const ProgressFn& progress,
-                                              bool ingest = true);
+                                              bool ingest = true,
+                                              std::array<StereoBuffer, kLaneCount>* stemsOut = nullptr);
 
 } // namespace rtg

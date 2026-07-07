@@ -460,7 +460,10 @@ void Comp::addSubFollow(const Section& s, int skipFirstBar) {
         // kick so the low end PUMPS. Deterministic (no RNG).
         const int subDiv = (agg > 0.6) ? 2 : 1;      // per-beat, or per-half-beat when hard
         const double stepB = 1.0 / double(subDiv);
-        const double slen = stepB * 0.94;            // rings almost to the next hit
+        // Leave a real GAP between sub hits so the low end PUMPS (swells then
+        // fades to a gap), like the reference — not a continuous wall. Soft
+        // attack keeps each hit a boom, not a kick thump.
+        const double slen = stepB * 0.58;
         for (int b = 0; b < s.bars; ++b) {
             if (b < skipFirstBar) continue;
             const int hits = int(BPB) * subDiv;      // 4 or 8 per bar

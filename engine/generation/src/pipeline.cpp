@@ -64,7 +64,8 @@ std::optional<GenerationResult> generateTrack(const Params& params,
                                               SoundLibrary& library,
                                               const std::atomic<bool>& cancelFlag,
                                               const ProgressFn& progress,
-                                              bool ingest) {
+                                              bool ingest,
+                                              std::array<StereoBuffer, kLaneCount>* stemsOut) {
     const auto t0 = std::chrono::steady_clock::now();
     const double sr = kSampleRate;
     auto report = [&](float f, const std::string& s) { if (progress) progress(f, s); };
@@ -172,6 +173,9 @@ std::optional<GenerationResult> generateTrack(const Params& params,
         report(frac, std::string("Rendering ") + laneName(Lane(li)));
         if (cancelled()) return std::nullopt;
     }
+
+    // Optional per-lane stems (raw, pre-mix) for analysis/inspection.
+    if (stemsOut) *stemsOut = laneAudio;
 
     // --- [5] Mix -----------------------------------------------------------
     report(0.78f, "Mixing");
