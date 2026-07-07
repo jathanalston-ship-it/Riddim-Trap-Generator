@@ -971,51 +971,53 @@ void Comp::composeIntro(const Section& s, int idx, Rng& r) {
     const int half = std::max(1, s.bars / 2);
     const double bb0 = s.startBar * BPB;
 
-    // RIDDIM: high-intensity JUNGLE breakbeat buildup (overrides the generic
-    // intro styles). Fast chopped snares + ghost hits + busy hats + a constant
-    // shaker, aggressive synth-horn POPS building in the back half, and a riser
-    // + accelerating snare roll slamming into the drop. No sub/growl yet — the
-    // low end SLAMS in only when the drop hits (ref: Seleman's jungle intro).
+    // RIDDIM: high-intensity TRIBAL / ORCHESTRAL tom buildup (overrides the
+    // generic intro styles). Tuned resonant toms (Kick lane, pitched >80 Hz →
+    // tom mode = timpani/bongo) drive a war-drum phrase that builds in density
+    // and pitch, a deep timpani + kick anchoring the downbeat, light hats +
+    // shaker, aggressive synth-horn pops in the back half, and an accelerating
+    // tom roll slamming into the drop. No sustained sub/growl until the drop —
+    // the low end SLAMS in only when the drop hits (ref: Seleman's intro).
     if (riddim) {
         const int bars = std::max(1, s.bars);
-        // scale-degree phrase for the aggressive horn pops.
-        static const int popDeg[] = {0, 0, 3, 0, 5, 3, 0, -2};
+        static const int popDeg[] = {0, 0, 3, 0, 5, 3, 0, -2};   // horn-pop phrase
+        static const int tomDeg[] = {0, 4, 2, 4, 0, 5, 4, 2};    // tuned-tom phrase
+        auto tom = [&](int deg) { return scalePitch(rootMid + 12, deg); }; // ~150-260 Hz bongo/tom
         for (int b = 0; b < bars; ++b) {
             const double bb = (s.startBar + b) * BPB;
             const bool last = (b == bars - 1);
             const float prog = bars > 1 ? float(b) / float(bars - 1) : 1.0f; // 0..1 build
 
             if (!last) {
-                // --- Breakbeat kicks: syncopated (amen-ish), busier as it builds.
-                add(Lane::Kick, bb + 0.0, 0.22, rootSub, hvel(r, 0.92f, 0.05f));
-                add(Lane::Kick, bb + 2.5, 0.20, rootSub, hvel(r, 0.80f, 0.05f));
-                if (r.chance(0.35 + 0.45f * prog))
-                    add(Lane::Kick, bb + 1.75, 0.18, rootSub, hvel(r, 0.7f, 0.05f));
-                if (r.chance(0.30 + 0.45f * prog))
-                    add(Lane::Kick, bb + 3.75, 0.18, rootSub, hvel(r, 0.68f, 0.05f));
+                // Deep timpani (low tom) + a kick for weight on the downbeat.
+                add(Lane::Kick, bb + 0.0, 0.6, tom(0) - 12, hvel(r, 0.95f, 0.04f)); // low timpani
+                add(Lane::Kick, bb + 0.0, 0.28, rootSub, hvel(r, 0.82f, 0.05f));    // sub weight
+                if (r.chance(0.5 + 0.4f * prog))
+                    add(Lane::Kick, bb + 2.0, 0.5, tom(2) - 12, hvel(r, 0.78f, 0.05f));
 
-                // --- Snare backbeat (beats 2 & 4) + JUNGLE ghost snares on 16ths.
-                add(Lane::Snare, bb + 1.0, 0.25, 38, hvel(r, 0.95f, 0.05f));
-                add(Lane::Snare, bb + 3.0, 0.25, 38, hvel(r, 0.95f, 0.05f));
-                for (int sub = 0; sub < 16; ++sub) {
-                    if (sub == 4 || sub == 12) continue;        // main backbeats already placed
-                    const float gp = (0.10f + 0.34f * prog) * ((sub % 2) ? 0.65f : 1.0f);
-                    if (r.chance(gp))
-                        add(Lane::Snare, mt(r, bb + sub * 0.25), 0.11, 38,
-                            hvel(r, 0.28f + 0.24f * prog, 0.06f)); // chopped ghost
+                // Driving tribal TOMS on the 8ths (tuned phrase), building fills.
+                for (int e = 0; e < 8; ++e) {
+                    const bool onBeat = (e % 2) == 0;
+                    if (!onBeat && !r.chance(0.32 + 0.55f * prog)) continue;
+                    add(Lane::Kick, mt(r, bb + e * 0.5), 0.42, tom(tomDeg[e & 7]),
+                        hvel(r, (onBeat ? 0.82f : 0.55f) * (0.72f + 0.28f * prog), 0.05f));
+                    // 16th roll fill after the beat as it builds.
+                    if (onBeat && prog > 0.45f && r.chance(0.5f * prog))
+                        add(Lane::Kick, bb + e * 0.5 + 0.25, 0.3,
+                            tom(tomDeg[(e + 1) & 7]), hvel(r, 0.5f, 0.05f));
                 }
 
-                // --- Busy jungle hats (16ths) + a constant soft shaker.
-                addRiddimHatBar(bb, r, 0.65f + 0.35f * prog, 0);
+                // Light hats + soft shaker (thinner than the drop's).
+                addRiddimHatBar(bb, r, 0.4f + 0.4f * prog, 3);
                 for (int sub = 1; sub < 16; sub += 2)
-                    if (r.chance(0.45 + 0.30f * prog))
+                    if (r.chance(0.30 + 0.30f * prog))
                         add(Lane::Perc, mt(r, bb + sub * 0.25), 0.11, 37,
-                            hvel(r, 0.30f, 0.05f), 0.4f);         // shaker
+                            hvel(r, 0.28f, 0.05f), 0.4f);          // shaker
 
-                // --- Aggressive synth-horn POPS in the back half, building.
+                // Aggressive synth-horn POPS in the back half, building.
                 if (prog > 0.30f) {
                     for (int e = 0; e < 8; ++e) {
-                        if (!r.chance(0.20 + 0.55f * prog)) continue;
+                        if (!r.chance(0.18 + 0.55f * prog)) continue;
                         add(Lane::BassB, mt(r, bb + e * 0.5), 0.18,
                             scalePitch(rootMid, popDeg[e & 7]),
                             hvel(r, 0.55f + 0.35f * prog, 0.06f),
@@ -1023,12 +1025,15 @@ void Comp::composeIntro(const Section& s, int idx, Rng& r) {
                     }
                 }
             } else {
-                // --- LAST BAR: accelerating snare roll + full hats slam into drop.
-                for (int k = 0; k < 16; ++k)
-                    add(Lane::Snare, bb + k * 0.25, 0.22, 38,
-                        hvel(r, 0.42f + 0.55f * (float(k) / 15.0f), 0.04f));
+                // LAST BAR: accelerating TOM roll (rising pitch + velocity) slam.
+                for (int k = 0; k < 16; ++k) {
+                    const float f = float(k) / 15.0f;
+                    add(Lane::Kick, bb + k * 0.25, 0.28,
+                        tom(tomDeg[k & 7]) + (k > 11 ? 5 : 0),
+                        hvel(r, 0.45f + 0.50f * f, 0.04f));
+                }
                 addRiddimHatBar(bb, r, 1.0f, 2);
-                add(Lane::Kick, bb + 0.0, 0.24, rootSub, hvel(r, 0.95f, 0.05f));
+                add(Lane::Kick, bb + 0.0, 0.6, tom(0) - 12, hvel(r, 0.95f, 0.04f));
             }
         }
         // Rising riser across the whole buildup into the drop.

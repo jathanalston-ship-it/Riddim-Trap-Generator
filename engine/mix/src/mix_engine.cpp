@@ -21,7 +21,7 @@ namespace {
 // Balance target (doc 07): low band (20-120 Hz) carries ~40-50% of drop
 // energy, mid-bass character audibly on top — sub supports, growls lead.
 constexpr float kLaneGainDb[kLaneCount] = {
-    /*Sub*/ -17.0f, /*BassA*/ -2.5f, /*BassB*/ -3.0f, /*BassC*/ -7.0f,
+    /*Sub*/ -11.0f, /*BassA*/ -3.0f, /*BassB*/ -3.5f, /*BassC*/ -7.0f,
     /*Kick*/ -8.0f, /*Snare*/ -5.5f, /*HatClosed*/ -9.0f, /*HatOpen*/ -10.0f,
     /*Perc*/ -11.0f, /*Melody*/ -12.0f, /*Pad*/ -15.0f, /*Riser*/ -12.5f,
     /*Downlifter*/ -12.5f, /*Impact*/ -8.0f, /*Crash*/ -11.0f,
@@ -262,8 +262,20 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
         subBus = laneBuf(Lane::Sub);
         forceMono(subBus);                        // sub forced mono
         applyStereo(makeLowpass(sr, 120.0), subBus);  // sub OWNS <120 Hz (clean crossover)
-        applyStereo(makeHighpass(sr, 35.0), subBus);  // kill sub-35 rumble that bloats the 20-60 band
-        applyEnv(subBus, bassChainDuck);          // whole bass chain ducks to ALL drums
+        applyStereo(makeHighpass(sr, 30.0), subBus);  // keep more deep weight (was 35)
+        // The SUB gets a SHALLOW duck of its own (not the deep whole-chain duck):
+        // it must stay present and FELT so the low-end chug is audible under the
+        // mid growl/horn. A deep -18 dB duck made the sub vanish → "no sub chug,
+        // just high tonals". Shallow kick duck keeps it chugging on its own note
+        // envelope; the growl/horn keep the deep duck for drum clarity.
+        if (riddim) {
+            std::vector<float> subDuck =
+                buildDuckEnv(score.notes(Lane::Kick), N, spb, sr, 3.0, 12.0,
+                             kickPumpRel, dbToGain(-6.0f));
+            applyEnv(subBus, subDuck);
+        } else {
+            applyEnv(subBus, bassChainDuck);
+        }
     }
 
     // --- BASS bus (sum voices -> saturation -> OTT-lite -> width) ----------

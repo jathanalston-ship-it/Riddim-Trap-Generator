@@ -102,14 +102,25 @@ StereoBuffer renderKick(const Recipe& rc, const Voice& v) {
     const float drive = rc.get("drive", 1.3f);
     const float gain = rc.get("gain", 0.82f);
 
+    // TOM/TIMPANI mode: a Kick note written at a real pitch (>80 Hz, i.e. a
+    // tuned drum, not the low kick root) becomes a resonant tuned tom — it lands
+    // ON the note pitch with only a small pitch drop and a longer ringing body.
+    // This gives the orchestral/bongo percussion for jungle intros without a
+    // separate lane. Low kick notes (rootSub, <80 Hz) are unaffected.
+    const bool tomMode = (double(v.freqHz) > 80.0);
+    const float effDropSemis = tomMode ? std::min(pitchDropSemis, 3.0f) : pitchDropSemis;
+    const float effBodyDecay = tomMode ? std::max(bodyDecay, 0.34f) : bodyDecay;
+    const float effClickAmt  = tomMode ? clickAmt * 0.4f : clickAmt;      // less beater click
+    const float effClickAmount = tomMode ? clickAmount * 0.4f : clickAmount;
+
     // Pitch envelope: instantaneous freq = root * 2^((dropSemis * exp(-t/tau))/12).
     // Starts +dropSemis above root and falls exponentially to root — the fast
     // downward "laser" transient that gives the kick its punch.
-    const double root = std::max(20.0f, endHz);
+    const double root = tomMode ? double(v.freqHz) : std::max(20.0f, endHz);
     const double tau = std::max(0.004f, pitchDropMs);
 
     double ph = 0, kph = 0;
-    EnvAD body;  body.start(0.0006f, bodyDecay, sr);
+    EnvAD body;  body.start(0.0006f, effBodyDecay, sr);
     EnvAD punch; punch.start(0.0004f, punchMs, sr);
     EnvAD knock; knock.start(0.0006f, knockMs, sr);
     EnvAD click; click.start(0.0002f, clickMs, sr);
@@ -130,7 +141,7 @@ StereoBuffer renderKick(const Recipe& rc, const Voice& v) {
     const float pDrive = 3.0f + 3.0f * parallelDriveMix;    // grit intensity
     for (size_t n = 0; n < N; ++n) {
         double t = double(n) / sr;
-        double semi = double(pitchDropSemis) * std::exp(-t / tau);
+        double semi = double(effDropSemis) * std::exp(-t / tau);
         double f = root * std::pow(2.0, semi / 12.0);
         // Fundamental sine + short-lived low harmonics (3f-5f, all <= ~250 Hz)
         // that vanish quickly for a clean sub tail.
@@ -153,9 +164,9 @@ StereoBuffer renderKick(const Recipe& rc, const Voice& v) {
         float grit = shTanh(distHp.process(bodyRaw), pDrive) * parallelDriveMix;
         // Beater click/knock — 2-6 kHz band-limited noise burst.
         float clk = clickLp.process(clickHp.process(clickBp.process(noise.tick())))
-                    * click.tick() * clickAmt;
+                    * click.tick() * effClickAmt;
         // Attack snap — HP'd noise, ultra-short, for transient definition.
-        float snp = snapHp.process(snapN.tick()) * snap.tick() * clickAmount;
+        float snp = snapHp.process(snapN.tick()) * snap.tick() * effClickAmount;
         float mix = bodyOut + grit + clk + snp;
         mix = eqClick.process(eqWeight.process(eqHp.process(mix)));
         float mono = dc.tick(mix) * v.velocity * gain;

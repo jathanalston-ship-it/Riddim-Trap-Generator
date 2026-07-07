@@ -607,10 +607,10 @@ Recipe makeSubRecipe(float aggr, float dark, float nov, Rng& rng) {
     // pump it to near-silence — a sustained-to-0.9 wall can't pump (it just
     // swells straight back and fills the gap). The pumping references (ETERNAL
     // 0.97, BULLETS 0.93) all have subs that duck to near-zero.
-    p["ampAtk"]    = rng.rangef(0.008f, 0.016f);                   // soft — no kick-like click
-    p["ampDec"]    = rng.rangef(0.05f, 0.10f);
-    p["ampSus"]    = rng.rangef(0.38f, 0.52f);                     // decays between hits -> pumps, not a wall
-    p["ampRel"]    = rng.rangef(0.04f, 0.09f);                     // rings out shorter between hits
+    p["ampAtk"]    = rng.rangef(0.003f, 0.007f);                   // punchy per-hit attack so the CHUG articulates (still no click)
+    p["ampDec"]    = rng.rangef(0.05f, 0.09f);
+    p["ampSus"]    = rng.rangef(0.34f, 0.46f);                     // clear attack->decay chug shape, not a drone
+    p["ampRel"]    = rng.rangef(0.04f, 0.08f);                     // rings out shorter between hits
     p["gain"]      = 0.72f;
     return r;
 }
