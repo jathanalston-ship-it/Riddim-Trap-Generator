@@ -1,14 +1,17 @@
 #include "GenerationController.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <ctime>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "rtg/decision/calibration.h"
 #include "rtg/decision/plan.h"
+#include "rtg/library/evolution.h"
 #include "rtg/library/preference_model.h"
 #include "rtg/synth/synth_engine.h"
 #include "rtg/utils/rng.h"
@@ -56,6 +59,14 @@ struct GenerationController::Impl {
     mutable std::mutex refMutex;
     std::string refStatus;                       // current file / result / error
 
+    // --- Background library evolution (doc 06 §5) ----------------------------
+    // A 30 s idle timer runs ONE bounded EvolutionEngine cycle on a worker
+    // thread whenever no generation / training / reference analysis is active.
+    // Capped per session so it never chews a laptop's battery in the background.
+    std::atomic<bool> evolving { false };        // a cycle is in flight
+    std::atomic<int>  evolveCyclesRun { 0 };     // cycles completed this session
+    static constexpr int kMaxEvoCyclesPerSession = 20;
+
     // Guards message-thread callbacks fired from worker threads.
     std::shared_ptr<bool> alive = std::make_shared<bool>(true);
 
@@ -86,6 +97,65 @@ struct GenerationController::Impl {
     };
     std::unique_ptr<GenThread> genThread;
 
+    //--- Background library evolution ------------------------------------------
+    // Worker that runs one evolution cycle then hands back on the message thread
+    // (mirrors GenThread's lifecycle so ~Impl can join it deterministically).
+    struct EvoThread : juce::Thread {
+        Impl& impl;
+        uint64_t seed;
+        EvoThread(Impl& i, uint64_t s) : juce::Thread("rtg-evolution"), impl(i), seed(s) {}
+        void run() override {
+            rtg::EvolutionEngine engine(impl.library);   // library is internally mutex-guarded
+            engine.runCycle(seed);
+            std::weak_ptr<bool> alive = impl.alive;
+            Impl* self = &impl;
+            juce::MessageManager::callAsync([alive, self]() {
+                if (alive.expired()) return;
+                self->onEvolutionFinished();
+            });
+        }
+    };
+    std::unique_ptr<EvoThread> evoThread;
+
+    // Message-thread idle poll: kicks a cycle only when everything else is idle.
+    struct EvoTimer : juce::Timer {
+        Impl& impl;
+        explicit EvoTimer(Impl& i) : impl(i) {}
+        void timerCallback() override { impl.startEvolutionCycle(); }
+    };
+    std::unique_ptr<EvoTimer> evoTimer;
+
+    void startEvolutionCycle() {
+        // Idle gate: never compete with the user's foreground work.
+        if (running.load() || trainRendering.load() || analyzingRefs.load()) return;
+        if (evolving.load() || evoThread) return;                 // single in-flight
+        if (evolveCyclesRun.load() >= kMaxEvoCyclesPerSession) return;
+        evolving.store(true);
+        // Cycle seed = stable hash of the library *contents* (sorted asset ids)
+        // + cycle index (matches the CLI's scheme; deterministic per (contents,
+        // index) and independent of the on-disk path).
+        uint64_t h = 1469598103934665603ull;                      // FNV-1a 64
+        {
+            std::vector<std::string> ids;
+            for (const auto& s : library.all()) ids.push_back(s.id);
+            std::sort(ids.begin(), ids.end());
+            for (const auto& id : ids) {
+                for (unsigned char c : id) { h ^= c; h *= 1099511628211ull; }
+                h ^= 0xff; h *= 1099511628211ull;
+            }
+        }
+        const uint64_t seed = h + uint64_t(evolveCyclesRun.load());
+        evoThread = std::make_unique<EvoThread>(*this, seed);
+        evoThread->startThread();
+    }
+
+    void onEvolutionFinished() {
+        evoThread.reset();                 // joins the just-finished worker
+        evolveCyclesRun.fetch_add(1);
+        evolving.store(false);
+        owner.sendChangeMessage();         // refresh the Library page
+    }
+
     //--------------------------------------------------------------------------
     explicit Impl(GenerationController& o)
         : library(dataDir().getChildFile("library").getFullPathName().toStdString()),
@@ -100,10 +170,17 @@ struct GenerationController::Impl {
         mixer.addInputSource(&previewTransport, false);
         sourcePlayer.setSource(&mixer);
         deviceManager.addAudioCallback(&sourcePlayer);
+
+        // Start the idle-evolution poll (30 s). Guards inside startEvolutionCycle
+        // ensure it only fires when no foreground work is running.
+        evoTimer = std::make_unique<EvoTimer>(*this);
+        evoTimer->startTimer(30000);
     }
 
     ~Impl() {
         *alive = false;
+        if (evoTimer) evoTimer->stopTimer();
+        if (evoThread) evoThread->stopThread(6000);   // a cycle is ~2-4 s; wait it out
         if (genThread) {
             cancelFlag.store(true);
             genThread->stopThread(4000);

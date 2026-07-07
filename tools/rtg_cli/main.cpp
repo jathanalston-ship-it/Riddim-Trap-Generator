@@ -6,6 +6,12 @@
 //           [--intro atmospheric|minimal|vocalchop|impact|fakeout]
 //           [--library <dir>] [--calibration <calibration.json>]
 //
+// Background library-evolution mode (no audio output):
+//   rtg_cli --evolve <N> --library <dir>
+//     Runs N idle-style evolution cycles (mutate/breed/prune) over the library
+//     in place, prints a per-cycle report, and exits. Deterministic per
+//     (library contents, cycle index). See docs/architecture/06-library-evolution.md.
+//
 // Reference-calibration analyzer mode (analysis-only):
 //   rtg_cli --analyze-refs <folder> [--genre riddim|trap] [--calib-out <path>]
 //     Analyzes every .wav in <folder> and writes calibration.json. See
@@ -22,6 +28,7 @@
 #include <vector>
 #include "rtg/decision/calibration.h"
 #include "rtg/generation/pipeline.h"
+#include "rtg/library/evolution.h"
 #include "rtg/master/master_engine.h"   // measureLufs
 #include "rtg/render/wav_writer.h"
 #include "wav_reader.h"
@@ -103,6 +110,49 @@ int runAnalyze(const std::string& folder, bool genreGiven, Genre genre,
     return 0;
 }
 
+// Background library evolution mode (doc 06 §5): run N idle-style cycles that
+// mutate/breed/prune the library in place, print a per-cycle report, exit. No
+// audio output. Deterministic per (library contents, cycle seed).
+int runEvolve(const std::string& libDir, int cycles) {
+    SoundLibrary library(libDir);
+    library.load();
+
+    // Cycle seed = cycle index + a stable hash of the library *contents* (its
+    // sorted asset ids), NOT the directory path. This differentiates distinct
+    // libraries onto separate rng trajectories yet makes two identical copies of
+    // the same library evolve byte-identically regardless of where they live on
+    // disk (doc 06 §8 determinism guarantee).
+    uint64_t contentHash = 1469598103934665603ull;           // FNV-1a 64
+    {
+        std::vector<std::string> ids;
+        for (const auto& s : library.all()) ids.push_back(s.id);
+        std::sort(ids.begin(), ids.end());
+        for (const auto& id : ids) {
+            for (unsigned char c : id) { contentHash ^= c; contentHash *= 1099511628211ull; }
+            contentHash ^= 0xff; contentHash *= 1099511628211ull;   // id separator
+        }
+    }
+
+    std::printf("[rtg] evolve: %d cycle(s) over %d sound(s) in %s\n",
+                cycles, (int)library.all().size(), libDir.c_str());
+
+    EvolutionEngine engine(library);
+    int totalAdmitted = 0, totalPruned = 0;
+    for (int i = 0; i < cycles; ++i) {
+        uint64_t seed = uint64_t(i) + contentHash;
+        EvolutionEngine::CycleReport r = engine.runCycle(seed);
+        totalAdmitted += r.admitted;
+        totalPruned += r.pruned;
+        std::printf("[rtg] cycle %2d/%d  focus=%-10s candidates=%d admitted=%d pruned=%d  (role now %d)\n",
+                    i + 1, cycles, roleName(r.focusedRole), r.candidates, r.admitted,
+                    r.pruned, library.countForRole(r.focusedRole));
+        std::fflush(stdout);
+    }
+    std::printf("[rtg] evolve done: +%d admitted, -%d pruned, %d sound(s) total\n",
+                totalAdmitted, totalPruned, (int)library.all().size());
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -112,6 +162,7 @@ int main(int argc, char** argv) {
     std::string analyzeRefs, calibOut, calibrationIn;
     bool genreGiven = false;
     bool libGiven = false;
+    int evolveCycles = 0;
 
     auto arg = [&](int& i) -> std::string {
         return (i + 1 < argc) ? std::string(argv[++i]) : std::string();
@@ -123,6 +174,7 @@ int main(int argc, char** argv) {
         else if (a == "--analyze-refs") analyzeRefs = arg(i);
         else if (a == "--calib-out") calibOut = arg(i);
         else if (a == "--calibration") calibrationIn = arg(i);
+        else if (a == "--evolve") evolveCycles = std::atoi(arg(i).c_str());
         else if (a == "--genre") { params.genre = (arg(i) == "trap") ? Genre::Trap : Genre::Riddim; genreGiven = true; }
         else if (a == "--bpm") params.bpm = std::atof(arg(i).c_str());
         else if (a == "--seconds") params.lengthSec = std::atof(arg(i).c_str());
@@ -150,6 +202,11 @@ int main(int argc, char** argv) {
                          : libGiven ? (fs::path(libDir) / "calibration.json").string()
                          : std::string("calibration.json");
         return runAnalyze(analyzeRefs, genreGiven, params.genre, dest);
+    }
+
+    // ---- Background library evolution mode --------------------------------
+    if (evolveCycles > 0) {
+        return runEvolve(libDir, evolveCycles);
     }
 
     // ---- Generation mode --------------------------------------------------
