@@ -148,6 +148,15 @@ struct Comp {
     void addMotif(int barStart, int bars, Rng& r, bool echo);
     void addPad(const Section& s, Rng& r);
 
+    // Musicality helpers (breaks/intros/outros/transitions).
+    void addBreakPad(const Section& s, Rng& r, float intensity);
+    void addTexture(const Section& s, Rng& r, int count);
+    void addTonalPerc(const Section& s, Rng& r, float density);
+    void dropTurnaround(const Section& s, int idx, Rng& r);
+    void addTransitions();
+    bool hasFxNear(double beat, double halfWin) const;
+    void addSwell(double startBeat, double lenBeats, float vel, bool rising);
+
     void buildCurves();
 };
 
@@ -535,8 +544,9 @@ void Comp::addMotif(int barStart, int bars, Rng& r, bool echo) {
     if (plan.melody01 < 0.2f) return;
     // Register varies per track (melodyReg) plus a per-call octave lift.
     const int reg = plan.rootMidi + 24 + melodyReg + (r.chance(0.5) ? 12 : 0);
-    // Build a 1-bar motif: constrained random walk, step bias, rests.
-    int nNotes = 2 + r.intRange(0, 2); // 2..4
+    // Build a 1-bar motif: constrained random walk, step bias, rests. Note
+    // count scales with Melody Amount so busier melodies fill more of the bar.
+    int nNotes = 2 + r.intRange(0, 1 + int(std::lround(plan.melody01 * 3.0f))); // 2..6
     struct MN { double beat; int deg; double len; };
     std::vector<MN> motif;
     int deg = 0;
@@ -593,40 +603,271 @@ void Comp::addPad(const Section& s, Rng& r) {
     }
 }
 
+// Break/atmosphere chord pad with real VOICE-LEADING: chords share common
+// tones (sustained, not re-struck) and only changed voices move. `intensity`
+// (0..1, from melody01) adds extension tones and a 7th/9th color as it rises.
+void Comp::addBreakPad(const Section& s, Rng& r, float intensity) {
+    static const int progs[4][4] = {
+        {0, 8, 10, 5},   // i - VI - VII - iv
+        {0, 5, 8, 10},   // i - iv - VI - VII
+        {0, 10, 8, 3},   // i - VII - VI - III
+        {0, 3, 5, 8},    // i - III - iv - VI
+    };
+    const int* prog = progs[breakProg & 3];
+    const int reg = plan.rootMidi + 12;
+    const double clen = 2.0 * BPB; // a chord spans two bars
+
+    // Build each chord as a small voicing (root, 3rd, 5th [, 7th]).
+    struct Held { int midi; double startBeat; double endBeat; float vel; };
+    std::vector<Held> held; // currently sounding voices (previous chord)
+
+    const bool addSeventh = intensity > 0.38f;
+    for (int b = 0; b < s.bars; b += 2) {
+        int chordRoot = reg + prog[(b / 2) % 4];
+        double bb = (s.startBar + b) * BPB;
+        double endB = bb + clen;
+
+        // Chord tones (minor triad + optional b7); voices as absolute midi.
+        std::vector<int> voices = {chordRoot, chordRoot + 3, chordRoot + 7};
+        if (addSeventh && r.chance(0.6)) voices.push_back(chordRoot + 10);
+        if (intensity > 0.75f && r.chance(0.4)) voices.push_back(chordRoot + 14); // 9th color
+
+        std::vector<Held> next;
+        for (int vm : voices) {
+            // Voice-leading: if a held voice already sounds this pitch, EXTEND it
+            // (sustain the common tone) rather than re-striking.
+            bool common = false;
+            for (auto& h : held) {
+                if (h.endBeat >= bb - 1e-6 && h.midi == vm) {
+                    h.endBeat = endB;                 // sustain through this chord
+                    next.push_back({vm, h.startBeat, endB, h.vel});
+                    common = true;
+                    break;
+                }
+            }
+            if (!common) {
+                float vel = hvel(r, (vm == chordRoot ? 0.5f : 0.42f), 0.03f);
+                add(Lane::Pad, bb, clen, vm, vel, 0.3f);
+                next.push_back({vm, bb, endB, vel});
+            }
+        }
+        held = next;
+    }
+}
+
+// TEXTURE layer: 1-2 slow-attack pad notes an octave up over the section
+// (mod=high → the Pad renderer stretches its attack into a swell).
+void Comp::addTexture(const Section& s, Rng& r, int count) {
+    const int reg = plan.rootMidi + 24;
+    const double span = s.bars * BPB;
+    for (int i = 0; i < count; ++i) {
+        // Spread across the section; scale-tone color (root / 5th / octave).
+        static const int cols[] = {0, 7, 12, 3};
+        int deg = cols[r.intRange(0, 3)];
+        double start = (s.startBar) * BPB + (span * double(i)) / double(std::max(1, count));
+        double len = std::min(span, 3.0 * BPB) + r.range(0.0, BPB);
+        add(Lane::Pad, start, len, reg + deg, hvel(r, 0.32f, 0.03f),
+            0.85f); // high mod = slow-attack texture swell
+    }
+}
+
+// Sparse TONAL percussion (rim/blip on scale tones) for break motion.
+void Comp::addTonalPerc(const Section& s, Rng& r, float density) {
+    const int reg = plan.rootMidi + 24;
+    for (int b = 0; b < s.bars; ++b) {
+        if (!r.chance(double(density))) continue;
+        double bb = (s.startBar + b) * BPB;
+        double off = r.chance(0.5) ? 1.5 : 3.5;
+        int deg = r.chance(0.5) ? 0 : (r.chance(0.5) ? 4 : 2);
+        add(Lane::Perc, mt(r, bb + off), 0.2, scalePitch(reg, deg),
+            hvel(r, 0.4f, 0.05f), 0.5f);
+    }
+}
+
+// DROP TURNAROUND: last bar of a drop breathes — the melodic bass rests (Sub
+// stays for continuity), a drum fill drives, and a micro-riser lifts into the
+// next section. Applied as a post-pass so the rest of the drop is untouched.
+void Comp::dropTurnaround(const Section& s, int idx, Rng& r) {
+    if (s.bars < 2) return;
+    const int lastBar = s.startBar + s.bars - 1;
+    const double lb = lastBar * BPB;
+    // Rest the melodic bass voices over the last two beats (the turnaround
+    // window) so the fill + micro-riser breathe; keep the first half of the bar
+    // and Sub intact for low-end glue and drop character.
+    for (Lane l : {Lane::BassA, Lane::BassB, Lane::BassC}) {
+        auto& v = score.notes(l);
+        v.erase(std::remove_if(v.begin(), v.end(), [&](const Note& n) {
+            return n.startBeat >= lb + 2.0 - 1e-6 && n.startBeat < lb + BPB - 1e-6;
+        }), v.end());
+    }
+    // Micro-riser (2-beat reverse swell) into the next section.
+    float nextE = (idx + 1 < int(plan.sections.size()))
+                      ? plan.sections[idx + 1].energy : 0.4f;
+    addSwell(lb + 2.0, 2.0, 0.6f + 0.3f * nextE, true);
+    // A tumbling perc/snare fill across the last two beats.
+    int n = 4 + int(std::lround(nextE * 3.0));
+    for (int h = 0; h < n; ++h) {
+        double t = lb + 2.0 + (2.0 * h) / n;
+        add(Lane::Perc, t, 0.18, 37,
+            hvel(r, 0.45f + 0.35f * (float(h) / float(n)), 0.05f), 0.5f);
+    }
+}
+
+// Is there any transition-FX note within ±halfWin beats of `beat`?
+bool Comp::hasFxNear(double beat, double halfWin) const {
+    for (Lane l : {Lane::Riser, Lane::Downlifter, Lane::Impact, Lane::Crash}) {
+        for (const Note& n : score.notes(l))
+            if (std::abs(n.startBeat - beat) <= halfWin) return true;
+    }
+    return false;
+}
+
+// A short reverse-riser swell (2-beat by default) — routed to the Riser lane
+// with a short length so the synth renders its reverse-swell mode.
+void Comp::addSwell(double startBeat, double lenBeats, float vel, bool rising) {
+    // rising → riser (bright up-sweep); falling → downlifter dive.
+    if (rising)
+        add(Lane::Riser, startBeat, lenBeats, plan.rootMidi + 32, vel, 0.9f);
+    else
+        add(Lane::Downlifter, startBeat, lenBeats, plan.rootMidi + 26, vel, 0.8f);
+}
+
+// TRANSITIONS pass: guarantee ear-candy at every section boundary. Draws from a
+// dedicated stream so it never perturbs per-section (drop) determinism.
+void Comp::addTransitions() {
+    Rng r = Rng(plan.params.seed).stream("composition").stream("transitions");
+    for (size_t i = 1; i < plan.sections.size(); ++i) {
+        const Section& prev = plan.sections[i - 1];
+        const Section& cur = plan.sections[i];
+        const double bnd = cur.startBar * BPB;
+        const float dE = cur.energy - prev.energy;
+
+        // Skip if a strong marker already sits on the boundary (drop entry,
+        // build riser start, break downlifter, etc.) — just complement it.
+        if (hasFxNear(bnd, 1.0)) {
+            // Add a subtle 1-beat pre-boundary swell as extra glue occasionally.
+            if (r.chance(0.35))
+                addSwell(bnd - 2.0, 2.0, 0.5f, dE >= 0.0f);
+            continue;
+        }
+
+        if (dE > 0.1f) {
+            // Rising: reverse-riser swell + a soft impact landing.
+            addSwell(bnd - 2.0, 2.0, 0.6f + 0.25f * cur.energy, true);
+            if (r.chance(0.6))
+                add(Lane::Impact, bnd, 0.8, rootSub, 0.8f, 1.0f);
+        } else if (dE < -0.1f) {
+            // Falling: downlifter dive + crash wash on the downbeat.
+            add(Lane::Downlifter, bnd, 2.0, plan.rootMidi + 26, 0.75f, 0.8f);
+            if (r.chance(0.5))
+                add(Lane::Crash, bnd, 1.8, 49, 0.7f, 0.5f);
+        } else {
+            // Flat: a light crash or swell to mark the seam.
+            if (r.chance(0.5))
+                add(Lane::Crash, bnd, 1.5, 49, 0.6f, 0.5f);
+            else
+                addSwell(bnd - 2.0, 2.0, 0.5f, true);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SECTION COMPOSERS
 void Comp::composeIntro(const Section& s, int idx, Rng& r) {
     (void)idx;
     const int half = std::max(1, s.bars / 2);
+    const double bb0 = s.startBar * BPB;
     switch (plan.params.introStyle) {
-        case IntroStyle::Atmospheric:
-            addPad(s, r);
-            // Sparse perc throughout; drums enter halfway.
+        case IntroStyle::Atmospheric: {
+            // Evolving pad bed + texture; a long riser lifts into the first
+            // build; sparse perc; drums only enter at the halfway point.
+            addBreakPad(s, r, std::max(0.35f, plan.melody01));
+            addTexture(s, r, 1 + (s.bars >= 12 ? 1 : 0));
+            // Rising riser over the back half → energy into the first build.
+            add(Lane::Riser, bb0 + double(half) * BPB, double(s.bars - half) * BPB,
+                plan.rootMidi + 34, 0.6f, 0.85f);
             for (int b = 0; b < s.bars; ++b)
-                if (r.chance(0.4))
-                    add(Lane::Perc, (s.startBar + b) * BPB + 2.5, 0.2, 37,
+                if (r.chance(0.35))
+                    add(Lane::Perc, mt(r, (s.startBar + b) * BPB + 2.5), 0.2, 37,
                         hvel(r, 0.4f, 0.05f), 0.5f);
             addDrums(s, r, 0.4f, true, true, s.startBar + half, s.bars - half);
             break;
-        case IntroStyle::Minimal:
+        }
+        case IntroStyle::Minimal: {
+            // Dry drum groove (no snare glue) + a filtered one-bar bass teaser
+            // per phrase: BassA root notes, low velocity, mod low = filtered.
             addDrums(s, r, 0.5f, false, true, s.startBar, s.bars);
+            for (int b = 0; b < s.bars; ++b) {
+                // One teaser bar every 4 bars: a couple of soft, dark stabs.
+                if ((b % 4) != 3) continue;
+                double bb = (s.startBar + b) * BPB;
+                for (double off : {1.5, 2.5, 3.5})
+                    if (r.chance(0.55))
+                        add(Lane::BassA, mt(r, bb + off), 0.3, rootMid,
+                            hvel(r, 0.45f, 0.04f), 0.2f); // filtered teaser
+            }
             break;
-        case IntroStyle::VocalChop:
-            addMotif(s.startBar, s.bars, r, true); // Melody-lane chops
-            addDrums(s, r, 0.4f, true, true, s.startBar + half, s.bars - half);
+        }
+        case IntroStyle::VocalChop: {
+            // Rhythmic MelodyLead chop pattern — short notes on a 1/8 grid with
+            // per-hit mod variation (formant color). Our closest thing to vocal
+            // chops: lean in. Drums enter halfway.
+            const int reg = plan.rootMidi + 24 + melodyReg;
+            static const int chopDegs[] = {0, 0, 2, 0, 4, 2, 0, -3};
+            for (int b = 0; b < s.bars; ++b) {
+                double bb = (s.startBar + b) * BPB;
+                // Rotate the chop phrase each bar for call/response feel.
+                int rot = (b % 2) ? 2 : 0;
+                for (int e = 0; e < 8; ++e) {
+                    if (!r.chance(0.55 + 0.2 * plan.melody01)) continue;
+                    int deg = chopDegs[(e + rot) & 7];
+                    double len = r.chance(0.5) ? 0.25 : 0.5;
+                    float col = 0.2f + 0.7f * float(r.uniform()); // formant color
+                    add(Lane::Melody, mt(r, bb + e * 0.5), len, scalePitch(reg, deg),
+                        hvel(r, 0.6f, 0.06f), col);
+                }
+            }
+            addDrums(s, r, 0.45f, true, true, s.startBar + half, s.bars - half);
             break;
-        case IntroStyle::Impact:
-            add(Lane::Impact, s.startBar * BPB, 1.0, rootSub, 1.0f, 1.0f);
-            addDrums(s, r, 0.8f, true, false, s.startBar, s.bars); // near-full groove
+        }
+        case IntroStyle::Impact: {
+            // Cold open: a single Impact then an immediate half-groove (drums +
+            // bass but thinned) — no long ramp, straight into motion.
+            add(Lane::Impact, bb0, 1.0, rootSub, 1.0f, 1.0f);
+            add(Lane::Crash, bb0, 1.8, 49, 0.75f, 0.5f);
+            addDrums(s, r, 0.7f, true, true, s.startBar, s.bars); // half-groove w/ snare
             addBass(s, r, 0);
             addSubFollow(s, 0);
             break;
-        case IntroStyle::Fakeout:
-            // Build-like intro.
-            add(Lane::Riser, s.startBar * BPB, s.bars * BPB, plan.rootMidi + 36,
-                0.8f, 0.8f);
-            addDrums(s, r, 0.6f, true, false, s.startBar, s.bars);
+        }
+        case IntroStyle::Fakeout: {
+            // Build-like tension from bar 1: full-length riser + snare-roll
+            // thickening toward the end + thinning kick.
+            add(Lane::Riser, bb0, s.bars * BPB, plan.rootMidi + 36, 0.8f, 0.85f);
+            const int rollStart = std::max(0, s.bars - 3);
+            for (int b = 0; b < s.bars; ++b) {
+                double bb = (s.startBar + b) * BPB;
+                if (b < s.bars - 2 || r.chance(0.5))
+                    add(Lane::Kick, bb, 0.5, rootSub, hvel(r, 0.9f, 0.05f));
+                add(Lane::Snare, bb + 2.0, 0.5, 38, hvel(r, 0.85f));
+                if (b >= rollStart) {
+                    int stage = b - rollStart;
+                    double step = 1.0 / double(1 << stage);
+                    int n = int(std::lround(BPB / step));
+                    for (int k = 0; k < n; ++k)
+                        add(Lane::Snare, bb + k * step, step * 0.9, 38,
+                            hvel(r, 0.5f + 0.4f * (float(k) / float(std::max(1, n))), 0.04f));
+                } else if (riddim) {
+                    addRiddimHatBar(bb, r, s.energy);
+                } else {
+                    for (int beat = 0; beat < 4; ++beat)
+                        if (r.chance(0.5))
+                            add(Lane::HatClosed, bb + beat + 0.5, 0.25, 42,
+                                hvel(r, 0.55f), 0.3f);
+                }
+            }
             break;
+        }
     }
 }
 
@@ -753,22 +994,55 @@ void Comp::composeDrop(const Section& s, int idx, Rng& r) {
         if (b + 1 < s.bars && r.chance(0.6))
             add(Lane::Crash, (s.startBar + b + 1) * BPB, 1.5, 49, 0.8f, 0.5f);
     }
+
+    // --- Post-pass ear-candy (drawn AFTER all drop content so the drop pattern
+    //     itself is bit-identical to before). ---
+    // Pre-drop "breath": a 1-beat all-lanes rest right before a non-fakeout
+    // drop, so it lands harder (prob 0.35). The fakeout has its own gap.
+    if (!fakeout && r.chance(0.35)) {
+        double cutFrom = entry - 1.0, cutTo = entry;
+        for (Lane l : {Lane::Kick, Lane::Snare, Lane::HatClosed, Lane::HatOpen,
+                       Lane::Perc, Lane::Sub, Lane::BassA, Lane::BassB, Lane::BassC}) {
+            auto& v = score.notes(l);
+            v.erase(std::remove_if(v.begin(), v.end(), [&](const Note& n) {
+                return n.startBeat >= cutFrom - 1e-6 && n.startBeat < cutTo - 1e-6;
+            }), v.end());
+        }
+    }
+    // Last-bar turnaround into the next section.
+    dropTurnaround(s, idx, r);
 }
 
 void Comp::composeBreak(const Section& s, int idx, Rng& r) {
-    // No sub/bass. Pad chords + melody if budget. Halftime sparse drums.
-    addPad(s, r);
-    if (plan.melody01 >= 0.2f)
+    // No sub/bass — this is the song's breathing room. The material scales with
+    // Melody Amount from an atmospheric drone up to a full topline + pad.
+    const float m = plan.melody01;
+
+    if (m < 0.2f) {
+        // ATMOSPHERIC (but never empty): a slow moving pad drone + texture and a
+        // whisper of tonal perc. Still has motion via the pad progression.
+        addBreakPad(s, r, 0.35f);
+        addTexture(s, r, 1 + (s.bars >= 12 ? 1 : 0));
+        addTonalPerc(s, r, 0.35f);
+    } else {
+        // Voice-led chord progression that actually moves + a call/response
+        // motif (quieter echo) + texture + sparse tonal percussion.
+        addBreakPad(s, r, m);
+        addTexture(s, r, 1 + (m > 0.5f ? 1 : 0));
         addMotif(s.startBar, s.bars, r, true);
-    // Sparse halftime drums (snare kept on 2).
+        addTonalPerc(s, r, 0.3f + 0.4f * m);
+    }
+
+    // Sparse halftime drums (snare kept on 2) — a little busier as energy rises.
     for (int b = 0; b < s.bars; ++b) {
         int bar = s.startBar + b;
         double bb = bar * BPB;
-        if (r.chance(0.6)) add(Lane::Kick, bb, 0.5, rootSub, hvel(r, 0.8f));
+        if (r.chance(0.55 + 0.2 * s.energy)) add(Lane::Kick, bb, 0.5, rootSub, hvel(r, 0.8f));
         add(Lane::Snare, bb + 2.0, 0.5, 38, hvel(r, 0.7f));
         if (r.chance(0.4))
-            add(Lane::HatClosed, bb + 2.5, 0.25, 42, hvel(r, 0.5f), 0.4f);
+            add(Lane::HatClosed, mt(r, bb + 2.5), 0.25, 42, hvel(r, 0.5f), 0.4f);
     }
+
     // Downlifter into the break (after the preceding drop).
     if (idx > 0 && plan.sections[idx - 1].type == SectionType::Drop)
         add(Lane::Downlifter, s.startBar * BPB, 2.0 * BPB, plan.rootMidi + 24,
@@ -776,9 +1050,10 @@ void Comp::composeBreak(const Section& s, int idx, Rng& r) {
 }
 
 void Comp::composeOutro(const Section& s, int idx, Rng& r) {
-    (void)idx;
-    // Pad tail + element-by-element removal every 4 bars.
-    addPad(s, r);
+    // Element-by-element removal every 4 bars, resolving to a held root chord +
+    // sub note that fade with the tail.
+    addBreakPad(s, r, std::max(0.35f, plan.melody01 * 0.8f));
+    addTexture(s, r, 1);
     const int phases = std::max(1, s.bars / 4);
     for (int b = 0; b < s.bars; ++b) {
         int bar = s.startBar + b;
@@ -790,8 +1065,25 @@ void Comp::composeOutro(const Section& s, int idx, Rng& r) {
         // Snare only in the first phase.
         if (phase == 0) add(Lane::Snare, bb + 2.0, 0.5, 38, hvel(r, 0.6f));
         if (phase < phases && r.chance(0.4 - 0.1f * phase))
-            add(Lane::HatClosed, bb + 2.5, 0.25, 42, hvel(r, 0.45f), 0.4f);
+            add(Lane::HatClosed, mt(r, bb + 2.5), 0.25, 42, hvel(r, 0.45f), 0.4f);
     }
+
+    // FINAL TONAL RESOLUTION: a root minor pad chord + sub fundamental over the
+    // last four bars, ringing out into the tail.
+    const int resBars = std::min(s.bars, 4);
+    const double rb = (s.startBar + s.bars - resBars) * BPB;
+    const double rlen = double(resBars) * BPB;
+    const int reg = plan.rootMidi + 12;
+    add(Lane::Pad, rb, rlen, reg, hvel(r, 0.5f, 0.02f), 0.6f);      // root
+    add(Lane::Pad, rb, rlen, reg + 3, hvel(r, 0.44f, 0.02f), 0.6f); // b3
+    add(Lane::Pad, rb, rlen, reg + 7, hvel(r, 0.42f, 0.02f), 0.6f); // 5th
+    // Gentle sub that fades with the tail (kept low so it never competes with
+    // the drops for loudness — it's a resolution, not a new low-end event).
+    add(Lane::Sub, rb, 2.0, rootSub, 0.4f, 0.2f);                   // fading sub
+    // Downlifter into the resolution when the outro follows a drop.
+    if (idx > 0 && plan.sections[idx - 1].type == SectionType::Drop)
+        add(Lane::Downlifter, s.startBar * BPB, 2.0 * BPB, plan.rootMidi + 24,
+            0.75f, 0.7f);
 }
 
 void Comp::composeSection(int idx) {
@@ -886,6 +1178,7 @@ Score compose(const Plan& plan) {
     Comp comp(plan, score);
     for (size_t i = 0; i < plan.sections.size(); ++i)
         comp.composeSection(int(i));
+    comp.addTransitions();   // ear-candy at every section boundary
     comp.buildCurves();
     return score;
 }
