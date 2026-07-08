@@ -443,6 +443,21 @@ def write_drum_profile(path, profile):
         out['hatCentroidHz'] = round(clampf(h['centroid_hz'], 4000, 16000), 1)
         out['hatDecayMs']    = round(clampf(h['decay_ms'], 37, 120), 1)
         out['hatDensityPerBeat'] = round(clampf(h['density']*4.0, 1.6, 3.6), 2)
+    # 16-step rhythmic accent maps ("how they're used"). The engine biases the
+    # chug/hat hit probabilities toward these so generations follow the
+    # reference's actual rhythm. Growl = the signature chug; hat = the top.
+    # PHASE-ALIGN to the downbeat first: patterns are folded from the drop
+    # window's arbitrary start, so rotate every map so the strongest KICK step
+    # (the downbeat) lands on index 0 — matching the composer's bar grid.
+    def rot(p, k): return [p[(i + k) % 16] for i in range(16)]
+    anchor = 0
+    if 'kick' in d and 'pattern16' in d['kick']:
+        anchor = int(np.argmax(d['kick']['pattern16']))
+    g = profile['tonal'].get('growl')
+    if g and 'pattern16' in g:
+        for i, v in enumerate(rot(g['pattern16'], anchor)): out[f'growlPattern{i}'] = round(float(v), 2)
+    if 'hat' in d and 'pattern16' in d['hat']:
+        for i, v in enumerate(rot(d['hat']['pattern16'], anchor)): out[f'hatPattern{i}'] = round(float(v), 2)
     out['refCount'] = 1
     with open(path, 'w') as fh:
         fh.write('{\n' + ',\n'.join(f'  "{k}": {v}' for k, v in out.items()) + '\n}\n')

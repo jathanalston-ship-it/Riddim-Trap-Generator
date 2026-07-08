@@ -277,18 +277,32 @@ void Comp::addBass(const Section& s, Rng& r, int skipFirstBar) {
             const int steps    = (mode == 1) ? 16 : 8;
             const double stepB = (mode == 1) ? 0.25 : 0.5;
 
+            // Reference chug rhythm ("how they're used"): when a growl accent map
+            // is loaded (from instruments.py --drum-profile-out), pull the OFF-BEAT
+            // fill probability toward the reference's accent at that 16th step so
+            // the generated chug follows the reference's rhythm. On-beats stay
+            // forced (the genre's on-grid stomp). The r.chance() draw is unchanged
+            // whether or not a pattern is loaded, so RNG order — and the no-profile
+            // render — is byte-identical; only the boolean outcome shifts.
+            const auto& dpc = rtg::DrumProfile::active();
+            const bool refChug = dpc.growlPattern[0] >= 0.0f;
+            auto refBias = [&](int e, double p) -> double {
+                if (!refChug) return p;
+                const float ref = dpc.growlPattern[((steps == 16) ? e : e * 2) & 15];
+                return ref < 0.0f ? p : 0.35 * p + 0.65 * double(ref);
+            };
             bool hit[16] = {false};
             for (int e = 0; e < steps; ++e) {
                 if (mode == 2) {                          // syncopated: lean off-beats
                     if (e % 2 == 1) { hit[e] = true; continue; }
-                    hit[e] = r.chance(0.5 + 0.3 * agg);
+                    hit[e] = r.chance(refBias(e, 0.5 + 0.3 * agg));
                     continue;
                 }
                 const bool onBeat = (mode == 1) ? (e % 4 == 0) : (e % 2 == 0);
                 if (onBeat) { hit[e] = true; continue; }
                 double p = 0.62 + 0.33 * agg + 0.10 * plan.complexity01;
                 if (mode == 1) p = (e % 2 == 0) ? 0.9 : (0.45 + 0.4 * agg); // DT: 8ths solid, 16ths fill
-                hit[e] = r.chance(std::min(0.98, p));
+                hit[e] = r.chance(std::min(0.98, refBias(e, p)));
             }
 
             std::vector<std::pair<int, double>> stabs;

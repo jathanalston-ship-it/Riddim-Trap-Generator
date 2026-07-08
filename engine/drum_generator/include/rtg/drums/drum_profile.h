@@ -38,6 +38,13 @@ struct DrumProfile {
     float hatDensityPerBeat = 2.8f;  // hat events per beat in drops (2.4..3.2)
     float hatDecayMs        = 78.0f; // hat-band decay time (37..120)
     float hatCentroidHz     = 10800.0f;// hat-band spectral centroid (crisp top)
+    // ---- RHYTHMIC ACCENT MAPS ("how they're used") ---------------------------
+    // 16-step (one bar) relative accent maps extracted from a reference. The
+    // composer biases its chug/hat hit probabilities toward these so generations
+    // follow the reference's actual rhythm. Sentinel [0] < 0 => UNSET (the engine
+    // uses its own probabilistic pattern, and the default render is unchanged).
+    float growlPattern[16] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
+    float hatPattern[16]   = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
 
     int refCount = 0;                // number of reference files aggregated
 

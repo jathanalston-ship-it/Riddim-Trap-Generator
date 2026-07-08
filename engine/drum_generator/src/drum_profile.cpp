@@ -537,6 +537,11 @@ bool DrumProfile::loadFromFile(const std::string& path) {
     hatDensityPerBeat = g("hatDensityPerBeat", hatDensityPerBeat);
     hatDecayMs        = g("hatDecayMs", hatDecayMs);
     hatCentroidHz     = g("hatCentroidHz", hatCentroidHz);
+    for (int i = 0; i < 16; ++i) {
+        char k[24];
+        std::snprintf(k, sizeof(k), "growlPattern%d", i); growlPattern[i] = g(k, growlPattern[i]);
+        std::snprintf(k, sizeof(k), "hatPattern%d", i);   hatPattern[i]   = g(k, hatPattern[i]);
+    }
     refCount          = int(std::lround(g("refCount", float(refCount))));
     return true;
 }

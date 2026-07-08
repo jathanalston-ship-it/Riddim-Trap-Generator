@@ -58,6 +58,17 @@ rtg_cli --out track.wav --drum-profile drums.json ...
 (Before this, `DrumProfile` could be extracted but was never activated in
 generation — the engine always used its builtin reference.)
 
+**Rhythm ("how they're used").** The drum profile also carries 16-step accent
+maps for the growl chug (`growlPattern0..15`) and hats (`hatPattern0..15`),
+phase-aligned to the downbeat (rotated so the strongest kick step is index 0).
+The composer biases its off-beat chug/hat hit *probabilities* toward these, so
+the generated rhythm follows the reference's — without changing the RNG draw
+order, so the no-profile render stays byte-identical and every render is
+deterministic. On-beats stay forced (the genre's on-grid stomp), so this
+refines the groove rather than overhauling it; the engine's default chug is
+already riddim-shaped (high phase-invariant correlation with references), so a
+new riddim reference nudges the specific accents rather than transforming them.
+
 ### Growl / spectral / loudness — `--analyze-refs` → `--calibration`
 The C++ analyzer measures the growl fingerprint (odd-harmonic fraction, centroid,
 wobble, roughness), Zwicker sharpness, band balance, crest, and loudness, and
