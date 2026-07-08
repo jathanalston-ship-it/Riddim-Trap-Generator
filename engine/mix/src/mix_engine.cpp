@@ -117,20 +117,24 @@ void applyCalibrationBandCorrection(StereoBuffer& mix, double sr, Genre genre) {
     const CalibrationProfile& prof = cal->forGenre(genre);
     if (!prof.present) return;
 
-    // Two passes with re-measurement: reference comparison showed one gentle
-    // pass leaves large spectral gaps (gen mid-band 2.8% vs ref 15.4%) —
-    // self-limiting because each pass corrects toward the measured target,
-    // so source-side improvements automatically shrink the applied EQ.
+    // Passes with re-measurement, self-limiting (each pass corrects toward the
+    // MEASURED target, so it can't overshoot and source-side improvements shrink
+    // the applied EQ automatically). Perceptual A/B on a DARK reference (Seleman:
+    // sub 0.79, mids ~0.05) showed the mix stayed mid-congested vs the reference
+    // because the growl bus adds a mid "scream" lift that a gentle half-strength
+    // correction couldn't claw back. So the correction now pulls harder (near
+    // full strength, +/-6 dB/pass, 3 passes) toward the reference balance — still
+    // self-limiting, still only active when a reference is calibrated.
     const double fc[kCalBands] = { 120.0, 250.0, 1000.0, 3500.0, 6000.0 };
-    for (int pass = 0; pass < 2; ++pass) {
+    for (int pass = 0; pass < 3; ++pass) {
         std::array<float, kCalBands> mine = measureBandShares(mix, sr);
         bool touched = false;
         for (int b = 0; b < kCalBands; ++b) {
             float target = prof.bands[b];
             float have = std::max(mine[b], 1e-6f);
-            // Energy ratio in dB at half strength, clamped to +/-4.5 dB/pass.
-            float trimDb = std::clamp(5.0f * std::log10(std::max(target, 1e-6f) / have),
-                                      -4.5f, 4.5f);
+            // Energy ratio in dB at ~0.85 strength, clamped to +/-6 dB/pass.
+            float trimDb = std::clamp(8.5f * std::log10(std::max(target, 1e-6f) / have),
+                                      -6.0f, 6.0f);
             if (std::fabs(trimDb) < 0.25f) continue;
             touched = true;
             Biquad bq = (b == 0)               ? makeLowShelf(sr, fc[0], trimDb)
