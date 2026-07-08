@@ -23,14 +23,18 @@ Recipe makeRiserRecipe(float aggr, float dark, float nov, Rng& rng) {
     Recipe r; r.role = Role::Riser; r.seed = rng.next();
     r.name = fName("riser", rng);
     auto& p = r.p;
-    p["octaves"]  = rng.rangef(1.0f, 2.0f);
+    p["octaves"]  = rng.rangef(1.4f, 2.6f);   // more range -> a bigger lift
     p["sawVoices"] = float(rng.intRange(3, 5));
     p["detune"]   = rng.rangef(8.0f, 25.0f);
     p["lpStart"]  = rng.rangef(400.0f, 900.0f);
-    p["lpEnd"]    = rng.rangef(6000.0f, 12000.0f) - dark * 3000.0f;
+    p["lpEnd"]    = rng.rangef(7000.0f, 13000.0f) - dark * 3000.0f;
     p["noiseMix"] = rng.rangef(0.4f, 0.7f);
     p["widthEnd"] = 0.9f;
-    p["gain"]     = 0.36f;   // subtler transition sweep (less cheesy)
+    // Filter RESONANCE grows toward the top -> a screaming, designed sweep.
+    // Derived from the recipe seed (NOT a shared-rng draw) so the rng stream —
+    // and every other recipe's seed — is unchanged; only the riser sound moves.
+    p["resEnd"]   = 1.6f + 1.2f * (float((r.seed >> 9) & 0xffu) / 255.0f);
+    p["gain"]     = 0.46f;   // present, not weak (still tasteful, not cheesy)
     return r;
 }
 
@@ -46,6 +50,7 @@ StereoBuffer renderRiser(const Recipe& rc, const Voice& v) {
     const float lpEnd = rc.get("lpEnd", 9000.0f);
     float noiseMix = rc.get("noiseMix", 0.55f);
     const float widthEnd = rc.get("widthEnd", 0.9f);
+    const float resEnd = rc.get("resEnd", 2.0f);
     const float gain = rc.get("gain", 0.5f);
 
     // VARIANT (seed-picked): 0 = noise-only whoosh, 1 = tonal saw sweep,
@@ -76,7 +81,10 @@ StereoBuffer renderRiser(const Recipe& rc, const Voice& v) {
     float curLp = lpStart;
     for (size_t n = 0; n < N; ++n) {
         double prog = double(n) * invN;             // 0..1
-        double pmul = std::pow(2.0, octaves * prog); // rising pitch
+        // ACCELERATING pitch rise (prog^1.5): the lift speeds up into the drop
+        // for a dramatic uplift instead of a flat linear ramp.
+        double pitchCurve = reverseSwell ? prog : std::pow(prog, 1.5);
+        double pmul = std::pow(2.0, octaves * pitchCurve);
         double tonal = 0.0;
         for (int i = 0; i < voices; ++i) {
             saw[i].setFreq(freq * det[i] * pmul, sr);
@@ -85,11 +93,14 @@ StereoBuffer renderRiser(const Recipe& rc, const Voice& v) {
         tonal /= voices;
         if ((coefCtr++ & 31) == 0) {
             // Reverse-swell opens the filter faster (linear) for an immediate
-            // whoosh; the long riser eases in (prog^2).
+            // whoosh; the long riser eases in (prog^2). Filter RESONANCE grows
+            // with progress so the sweep SCREAMS as it approaches the top — a
+            // designed uplifter, not a plain lowpass whoosh.
             double fcurve = reverseSwell ? prog : (prog * prog);
             curLp = lpStart + (lpEnd - lpStart) * float(fcurve);
-            lpL.setLowpass(curLp, 0.9, sr);
-            lpR.setLowpass(curLp, 0.9, sr);
+            double q = 0.9 + (double(resEnd) - 0.9) * (prog * prog);
+            lpL.setLowpass(curLp, q, sr);
+            lpR.setLowpass(curLp, q, sr);
         }
         // Amplitude swell: long riser is prog^2 (abrupt end); reverse-swell
         // uses a smoother prog^1.4 so the tail peaks and rolls into the hit.
@@ -156,7 +167,9 @@ StereoBuffer renderDownlifter(const Recipe& rc, const Voice& v) {
         tonal /= voices;
         if ((coefCtr++ & 31) == 0) {
             curLp = lpStart + (lpEnd - lpStart) * float(prog);
-            lpL.setLowpass(curLp, 0.9, sr); lpR.setLowpass(curLp, 0.9, sr);
+            // Resonance grows as it falls -> a designed dive, not a plain fade.
+            double q = 0.9 + 1.4 * (prog * prog);
+            lpL.setLowpass(curLp, q, sr); lpR.setLowpass(curLp, q, sr);
         }
         float amp = 1.0f - float(prog) * 0.15f;         // gentle fade
         float sigL = lpL.process(float(tonal) * (1.0f - noiseMix) + nzL.tick() * noiseMix);
