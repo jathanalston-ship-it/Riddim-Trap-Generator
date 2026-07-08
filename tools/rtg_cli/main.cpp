@@ -5,7 +5,7 @@
 //           [--complexity 50] [--melody 30] [--chaos 25] [--drops 2]
 //           [--intro atmospheric|minimal|vocalchop|impact|fakeout]
 //           [--library <dir>] [--calibration <calibration.json>]
-//           [--drum-profile <drum_profile.json>]
+//           [--drum-profile <drum_profile.json>] [--structure <structure.json>]
 //
 // Background library-evolution mode (no audio output):
 //   rtg_cli --evolve <N> --library <dir>
@@ -28,6 +28,7 @@
 #include <string>
 #include <vector>
 #include "rtg/decision/calibration.h"
+#include "rtg/decision/structure_profile.h"  // StructureProfile::setActive (reference form)
 #include "rtg/drums/drum_profile.h"       // DrumProfile::setActive (reference drums)
 #include "rtg/library/ab_log.h"
 #include "rtg/generation/pipeline.h"
@@ -162,7 +163,7 @@ int main(int argc, char** argv) {
     Params params;
     std::string out = "rtg_track.wav";
     std::string libDir = "rtg_library";
-    std::string analyzeRefs, calibOut, calibrationIn, stemsDir, scoreOut, drumProfileIn;
+    std::string analyzeRefs, calibOut, calibrationIn, stemsDir, scoreOut, drumProfileIn, structureIn;
     bool genreGiven = false;
     bool libGiven = false;
     int evolveCycles = 0;
@@ -180,6 +181,7 @@ int main(int argc, char** argv) {
         else if (a == "--calib-out") calibOut = arg(i);
         else if (a == "--calibration") calibrationIn = arg(i);
         else if (a == "--drum-profile") drumProfileIn = arg(i);
+        else if (a == "--structure") structureIn = arg(i);
         else if (a == "--evolve") evolveCycles = std::atoi(arg(i).c_str());
         else if (a == "--ab-summary") abSummary = arg(i);
         else if (a == "--ab-last") abLast = std::atoi(arg(i).c_str());
@@ -262,6 +264,19 @@ int main(int argc, char** argv) {
                         dp.hatCentroidHz, dp.hatDecayMs);
         } else {
             std::printf("[rtg] WARNING: could not load drum profile %s\n", drumProfileIn.c_str());
+        }
+    }
+    // Reference song-FORM steering: a StructureProfile extracted from a reference
+    // (e.g. by tools/earview/structure.py --struct-profile-out) makes the
+    // arrangement builder use the measured section bar-lengths + drop count.
+    if (!structureIn.empty()) {
+        StructureProfile spf;
+        if (spf.loadFromFile(structureIn)) {
+            StructureProfile::setActive(spf);
+            std::printf("[rtg] structure: loaded %s (intro %d, drop %d, break %d, outro %d bars, %d drops)\n",
+                        structureIn.c_str(), spf.introBars, spf.dropBars, spf.breakBars, spf.outroBars, spf.dropCount);
+        } else {
+            std::printf("[rtg] WARNING: could not load structure %s\n", structureIn.c_str());
         }
     }
     std::printf("[rtg] library: %d sounds in %s\n", (int)library.all().size(), libDir.c_str());

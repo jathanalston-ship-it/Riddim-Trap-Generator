@@ -4,6 +4,7 @@
 // no time(), no rand().
 #include "rtg/decision/plan.h"
 #include "rtg/decision/calibration.h"
+#include "rtg/decision/structure_profile.h"
 #include "rtg/utils/rng.h"
 
 #include <algorithm>
@@ -83,6 +84,8 @@ Plan makePlan(const Params& params) {
     // seeds distribute the "filler" bars across different sections — genuinely
     // different structures per seed rather than one canonical layout.
     int dropCount = std::clamp(params.dropCount, 1, 4);
+    const StructureProfile& sp = StructureProfile::active();
+    if (sp.present && sp.dropCount > 0) dropCount = std::clamp(sp.dropCount, 1, 4);
     const int targetBars = barsForSeconds(params.lengthSec, bpm);
     // Reconcile drop count with the requested length: each dropset needs at
     // least build(4) + drop(16) (+break(8) between), plus intro/outro(4+4).
@@ -130,17 +133,26 @@ Plan makePlan(const Params& params) {
     std::vector<int> breakBars(std::max(0, dropCount - 1));
     for (int& b : breakBars) b = pickMenu({8,12,16}, {2.0, 1.4, 1.0});
 
+    // Reference song-form override: use the measured section bar-lengths verbatim.
+    if (sp.present) {
+        if (sp.introBars > 0) introBars = sp.introBars;
+        if (sp.buildBars > 0) buildBars = sp.buildBars;
+        if (sp.outroBars > 0) outroBars = sp.outroBars;
+        if (sp.dropBars  > 0) for (int& d : dropBars)  d = sp.dropBars;
+        if (sp.breakBars > 0) for (int& b : breakBars) b = sp.breakBars;
+    }
+
     // ---- Structure variants (categorical, seed-driven) ---------------------
     // (1) Extended outro-drop: the final drop gets +8 bars ~25% of the time.
     const bool extOutroDrop = rng.chance(0.25);
-    if (extOutroDrop && !dropBars.empty()) dropBars.back() += 8;
+    if (extOutroDrop && !sp.present && !dropBars.empty()) dropBars.back() += 8;
 
     // (2) Reset between dropsets ~30%: insert a second Break OR a mini-intro
     //     "reset" at one of the mid-song break boundaries.
     enum class ResetKind { None, ExtraBreak, MiniIntro };
     ResetKind resetKind = ResetKind::None;
     int resetBars = 0, resetAtBreak = -1;
-    if (dropCount >= 2 && rng.chance(0.30)) {
+    if (!sp.present && dropCount >= 2 && rng.chance(0.30)) {
         resetAtBreak = rng.intRange(0, dropCount - 2);
         resetKind    = rng.chance(0.5) ? ResetKind::ExtraBreak : ResetKind::MiniIntro;
         resetBars    = rng.chance(0.5) ? 4 : 8;
@@ -185,7 +197,7 @@ Plan makePlan(const Params& params) {
                 if (!improved) break;
             }
         };
-        climb();
+        if (!sp.present) climb();
     }
 
     // ---- Palettes: one per drop (widened character spread) ------------------
