@@ -45,11 +45,18 @@ def write_png_rgb(path,rgb):
     open(path,'wb').write(b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',W,H,8,2,0,0,0))
                           +chunk(b'IDAT',zlib.compress(bytes(raw),9))+chunk(b'IEND',b''))
 
-def spec_img(seg,sr,W,H,fmin=30,fmax=16000):
+def bark_freqs(fmin,fmax,H):
+    # frequencies spaced evenly on the BARK (critical-band) scale — perceptual
+    # pitch spacing: bass detail expands, treble compresses, matching the ear.
+    b=lambda f: 13*np.arctan(0.00076*f)+3.5*np.arctan((f/7500.0)**2)
+    ff=np.linspace(fmin,fmax,4000); bb=b(ff)
+    return np.interp(np.linspace(bb[0],bb[-1],H),bb,ff)
+
+def spec_img(seg,sr,W,H,fmin=30,fmax=16000,scale='log'):
     f,t,Z=stft(seg,sr,nperseg=2048,noverlap=1536)
     mag=20*np.log10(np.abs(Z)+1e-6)
-    logf=np.logspace(np.log10(fmin),np.log10(fmax),H)
-    Zl=np.array([mag[np.argmin(np.abs(f-ff))] for ff in logf])
+    freqs=bark_freqs(fmin,fmax,H) if scale=='bark' else np.logspace(np.log10(fmin),np.log10(fmax),H)
+    Zl=np.array([mag[np.argmin(np.abs(f-ff))] for ff in freqs])
     lo,hi=np.percentile(Zl,5),np.percentile(Zl,99.5)
     img=hot(np.clip((Zl-lo)/(hi-lo+1e-9),0,1))[::-1]
     xs=(np.arange(W)*(img.shape[1]/W)).astype(int)
@@ -217,12 +224,25 @@ def cmd_fp(a):
     print(f"  PUMP dipRatio {pd['dip']:.2f} (0=wall 1=to-silence)  p15 {pd['p15']:.2f} p85 {pd['p85']:.2f}")
     print(f"  GROWL f0 {gr['f0']:.0f}Hz  oddRatio {gr['odd']:.2f}  wobble {gr['wob']:.1f}Hz")
 
+# BARK (perceptual-frequency) spectrogram: same as spec but the vertical axis is
+# spaced by critical band, so what the image SHOWS matches how the ear spaces
+# pitch (bass expanded, treble compressed). usage: bark <wav> <bpm> <out> [start] [bars]
+def cmd_bark(a):
+    wav,bpm,out=a[0],float(a[1]),a[2]
+    start=a[3] if len(a)>3 else 'auto'; bars=int(a[4]) if len(a)>4 else 4
+    x,sr=load_wav(wav); seg,t0=pick_window(x,sr,bpm,bars,start)
+    img=beat_lines(np.repeat(spec_img(seg,sr,1100,300,30,16000,'bark'),2,0),bars)
+    write_png_rgb(out,img)
+    print(f"# BARK spec {os.path.basename(wav)}  {t0:.1f}s {bars} bars @ {bpm} BPM -> {out}")
+    print("# vertical axis = Bark (perceptual): bass detail expanded, treble compressed")
+
 def main():
-    if len(sys.argv)<2: print("usage: earview.py spec|stems|compare|fp ..."); return
+    if len(sys.argv)<2: print("usage: earview.py spec|bark|stems|compare|fp ..."); return
     c=sys.argv[1]
     if c=='stems': cmd_stems(sys.argv[2:])
     elif c=='compare': cmd_compare(sys.argv[2:])
     elif c=='fp': cmd_fp(sys.argv[2:])
+    elif c=='bark': cmd_bark(sys.argv[2:])
     elif c=='spec': cmd_spec(sys.argv[2:])
     else: cmd_spec(sys.argv[1:])   # back-compat: earview.py <wav> <bpm> <out> ...
 main()

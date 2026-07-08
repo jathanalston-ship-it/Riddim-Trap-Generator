@@ -135,9 +135,59 @@ def cmd_dist(a):
     score=100*np.exp(-(dr/120+ds/120+dbk/8+dmf/25))
     print(f"  -> overall perceptual similarity: {score:4.0f}/100")
 
+# ------------------------------------------------------------------ semantic ears
+# Map the perceptual feature vector to human-readable descriptors (the "what does
+# it sound like" layer). Thresholds calibrated from the riddim reference set
+# (Seleman/MSTIC/ETERNAL/Aweminus/BULLETS measured with this tool). A generic
+# pretrained tagger (YAMNet/CLAP) is blocked by the network policy here, so this
+# reference-grounded vocabulary is the practical "semantic ears".
+def _bucket(v, edges, words):
+    for e,w in zip(edges,words):
+        if v<e: return w
+    return words[-1]
+
+def describe(F):
+    d=[]
+    d.append(_bucket(F['roughness'], [600,1000,1400], ['smooth/clean','moderate','aggressive','extremely distorted']))
+    d.append(_bucket(F['sharpness'], [40,52,64], ['dark/warm','balanced','bright','harsh/piercing']))
+    bk=F['bark']; air=bk[18:].sum(); mid=bk[8:16].sum()
+    if air>0.10: d.append('airy top')
+    if mid<0.12: d.append('scooped mids')
+    d.append(_bucket(F['loudness'], [-12,-9,-7], ['dynamic','loud','very loud','brickwalled']))
+    return d
+
+def cmd_describe(a):
+    path=a[0]; bpm=float(a[1]) if len(a)>1 else 145.0
+    x,sr=load(path); F=features(x,sr,bpm)
+    print(f"=== {os.path.basename(path)} SOUNDS LIKE ===")
+    print("  "+", ".join(describe(F)))
+    print(f"  [roughness {F['roughness']:.0f}  sharpness {F['sharpness']:.1f}  loudness {F['loudness']:.1f} LUFS]")
+
+def cmd_nearest(a):
+    # classify a track against a folder of reference wavs: which does it sound
+    # most like? usage: nearest <wav> <refdir> [bpm]
+    path=a[0]; refdir=a[1]; bpm=float(a[2]) if len(a)>2 else 145.0
+    import glob
+    x,sr=load(path); A=features(x,sr,bpm)
+    print(f"=== {os.path.basename(path)} — nearest reference ===")
+    scores=[]
+    for rf in sorted(glob.glob(os.path.join(refdir,'*.wav'))):
+        xb,_=load(rf); B=features(xb,sr,bpm)
+        dr=abs(A['roughness']-B['roughness'])/max(1,B['roughness'])
+        ds=abs(A['sharpness']-B['sharpness'])/max(0.1,B['sharpness'])
+        dbk=np.sqrt(np.mean((A['bark']-B['bark'])**2))
+        dmf=np.linalg.norm(A['mfcc']-B['mfcc'])
+        sim=100*np.exp(-(dr+ds+dbk*12+dmf/25))
+        scores.append((sim,os.path.basename(rf)))
+    for sim,nm in sorted(scores,reverse=True):
+        print(f"  {sim:4.0f}/100  {nm}")
+
 def main():
-    if len(sys.argv)<3: print("usage: ears.py ears <wav> [bpm] | dist <a> <b> [bpm]"); return
+    if len(sys.argv)<3:
+        print("usage: ears.py ears|describe <wav> [bpm] | dist <a> <b> [bpm] | nearest <wav> <refdir> [bpm]"); return
     c=sys.argv[1]
     if c=='ears': cmd_ears(sys.argv[2:])
     elif c=='dist': cmd_dist(sys.argv[2:])
+    elif c=='describe': cmd_describe(sys.argv[2:])
+    elif c=='nearest': cmd_nearest(sys.argv[2:])
 main()
