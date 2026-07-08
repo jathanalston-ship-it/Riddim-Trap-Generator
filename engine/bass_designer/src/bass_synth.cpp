@@ -601,7 +601,17 @@ Recipe makeSubRecipe(float aggr, float dark, float nov, Rng& rng) {
     p["drive"]     = 1.6f + aggr * 2.0f + rng.rangef(-0.1f, 0.2f); // aggressive saturation, scales w/ aggr
     p["pitchStart"]= 0.0f;                                         // NO pitch blip — a boom, not a kick-thump
     p["pitchDecay"]= rng.rangef(0.02f, 0.05f);
-    p["lpFreq"]    = rng.rangef(180.0f, 240.0f);                   // let 2nd/3rd harmonics spread into 60-120 (mix crossover keeps <120)
+    p["lpFreq"]    = rng.rangef(180.0f, 240.0f);                   // clean-sub body LP
+    // CRUNCH: a parallel hard-waveshaped layer that generates a rich harmonic
+    // series spanning up into the low-mids, so the sub stays audible via its
+    // harmonics on small speakers that can't reproduce the fundamental (the
+    // "missing fundamental" translation trick — ref Seleman's crunchy sub).
+    // The clean sub keeps the deep body; the crunch is band-limited above it.
+    p["crunchMix"]   = clampf(0.58f + aggr * 0.15f + rng.rangef(-0.05f, 0.05f), 0.3f, 0.85f);
+    p["crunchDrive"] = rng.rangef(7.0f, 12.0f);                   // hard clip -> square-ish harmonic comb
+    p["crunchBias"]  = rng.rangef(0.20f, 0.36f);                   // more asymmetry -> stronger even (h2) harmonics
+    p["crunchHp"]    = rng.rangef(90.0f, 130.0f);                  // keep the deep fundamental clean
+    p["crunchLp"]    = rng.rangef(600.0f, 900.0f);                 // crunch spans the low-mids
     // BOOM WITH A GAP: soft attack (no click), MODERATE sustain + fairly fast
     // release so the sub decays between hits and the deep kick sidechain can
     // pump it to near-silence — a sustained-to-0.9 wall can't pump (it just
@@ -632,11 +642,20 @@ StereoBuffer renderSub(const Recipe& rc, const Voice& v) {
     const float ampRel = rc.get("ampRel", 0.03f);
     const float gain = rc.get("gain", 0.7f);
     const float driveNorm = 1.0f / std::tanh(drive);   // peak-normalise the saturation (bounded)
+    const float crunchMix   = clampf(rc.get("crunchMix", 0.4f), 0.0f, 0.85f);
+    const float crunchDrive = std::max(1.0f, rc.get("crunchDrive", 8.0f));
+    const float crunchBias  = rc.get("crunchBias", 0.2f);
+    const float crunchHp    = clampf(rc.get("crunchHp", 110.0f), 40.0f, 300.0f);
+    const float crunchLp    = clampf(rc.get("crunchLp", 700.0f), 300.0f, 2000.0f);
+    const float crunchNorm  = 1.0f / std::tanh(crunchDrive);
+
     double ph = 0;
     EnvADSR amp; amp.start(ampAtk, ampDec, ampSus, ampRel, sr);
     const size_t gateN = size_t(std::llround(v.gateSec * sr));
-    Biquad lp; lp.setLowpass(lpFreq, 0.707, sr);       // keep the driven sub warm, not fizzy
-    DCBlock dc;
+    Biquad lp; lp.setLowpass(lpFreq, 0.707, sr);       // clean-sub body LP
+    Biquad crHp; crHp.setHighpass(crunchHp, 0.707, sr);   // crunch: keep the deep fundamental clean
+    Biquad crLp; crLp.setLowpass(crunchLp, 0.707, sr);    // crunch: span the low-mids, no fizz
+    DCBlock dc, crDc;
     for (size_t n = 0; n < N; ++n) {
         const bool gate = n < gateN;
         double t = double(n) / sr;
@@ -647,9 +666,15 @@ StereoBuffer renderSub(const Recipe& rc, const Voice& v) {
                  + h2 * std::sin(kTwoPi * 2.0 * ph)
                  + h3 * std::sin(kTwoPi * 3.0 * ph);
         ph += f / sr; if (ph >= 1.0) ph -= 1.0;
-        // aggressive saturation (weight + grit), peak-normalised so |o| stays bounded.
-        float o = std::tanh(float(s) * drive) * driveNorm;
-        o = lp.process(o);                             // contain harmonics in the sub band (<~150 Hz)
+        // Clean sub: warm saturation, LP'd low for the deep body.
+        float clean = lp.process(std::tanh(float(s) * drive) * driveNorm);
+        // CRUNCH: hard, slightly asymmetric waveshape -> rich odd+even harmonic
+        // comb; band-limited above the fundamental so it fills the low-mids and
+        // translates on small speakers (the missing-fundamental cue).
+        float cr = std::tanh((float(s) + crunchBias) * crunchDrive) * crunchNorm;
+        cr = crDc.tick(cr);                            // remove the bias DC
+        cr = crLp.process(crHp.process(cr));
+        float o = clean + crunchMix * cr;
         float mono = dc.tick(o) * amp.tick(gate) * v.velocity * gain;
         if (!std::isfinite(mono)) mono = 0.0f;         // NaN/Inf guard
         out.l[n] = mono; out.r[n] = mono; // strictly mono

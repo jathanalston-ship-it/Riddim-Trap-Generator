@@ -261,8 +261,12 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
     if (has(Lane::Sub)) {
         subBus = laneBuf(Lane::Sub);
         forceMono(subBus);                        // sub forced mono
-        applyStereo(makeLowpass(sr, 120.0), subBus);  // sub OWNS <120 Hz (clean crossover)
-        applyStereo(makeHighpass(sr, 30.0), subBus);  // keep more deep weight (was 35)
+        // Let the sub's harmonic CRUNCH through (up to ~650 Hz) so the low end is
+        // audible via its harmonics on small speakers — no longer a clean <120 Hz
+        // crossover. The clean body is LP'd low in the synth; this passes the
+        // waveshaped harmonic comb into the low-mids (ref Seleman).
+        applyStereo(makeLowpass(sr, 650.0), subBus);
+        applyStereo(makeHighpass(sr, 30.0), subBus);  // keep deep weight
         // The SUB gets a SHALLOW duck of its own (not the deep whole-chain duck):
         // it must stay present and FELT so the low-end chug is audible under the
         // mid growl/horn. A deep -18 dB duck made the sub vanish → "no sub chug,
@@ -290,11 +294,11 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
         for (size_t i = 0; i < N; ++i) { bassBus.l[i] += b.l[i]; bassBus.r[i] += b.r[i]; }
     }
     if (anyBass) {
-        // Low-mid mud dip (deep + wide): scoop the growl's ~150-450 Hz body hard
-        // so the 120-500 band stops masking the sub and mids (target share ~0.11;
-        // was reading ~0.33 — muddy). Two scoops: a wide body cut + a lower dip.
-        applyStereo(makePeaking(sr, 260.0, -8.0, 0.6), bassBus);
-        applyStereo(makePeaking(sr, 160.0, -4.0, 0.9), bassBus);
+        // Low-mid mud dip: scoop the growl's ~150-450 Hz body so it stops masking
+        // the sub/mids. Eased from -8/-4 so the SUB's harmonic crunch (which now
+        // lives in this band for small-speaker translation) survives.
+        applyStereo(makePeaking(sr, 260.0, -5.0, 0.6), bassBus);
+        applyStereo(makePeaking(sr, 160.0, -2.5, 0.9), bassBus);
         // Mid presence: a broad lift through the 600-2500 Hz "scream" band plus a
         // narrower bite so the growl carries the mid/presence lane the aggressive
         // references sit in (500-2k share ~0.06).
