@@ -63,6 +63,30 @@ Biquad highShelf(double fs, double f0, double gainDb, double S = 0.9) {
     return bq;
 }
 
+Biquad highPass(double fs, double f0, double Q = 0.707) {
+    Biquad bq; f0 = std::min(std::max(f0, 10.0), fs * 0.49);
+    double w0 = 2 * kPi * f0 / fs, c = std::cos(w0), s = std::sin(w0), al = s / (2 * Q);
+    bq.set((1 + c) / 2, -(1 + c), (1 + c) / 2, 1 + al, -2 * c, 1 - al);
+    return bq;
+}
+
+// Perceived-brightness proxy: RMS above ~3.5 kHz relative to the audible
+// mid+high (>500 Hz), NOT total — so the huge sub/bass doesn't dilute it (like
+// Zwicker sharpness's Bark weighting). Rises with harsh/bright content; used to
+// auto-scale the master air so already-bright material isn't over-brightened.
+float measureHiShare(const StereoBuffer& b, double fs) {
+    if (b.empty()) return 0.0f;
+    Biquad hl = highPass(fs, 3500.0), hr = highPass(fs, 3500.0);
+    Biquad ml = highPass(fs, 500.0),  mr = highPass(fs, 500.0);
+    double hi = 0.0, mid = 0.0;
+    for (size_t i = 0; i < b.size(); ++i) {
+        float h = hl.process(b.l[i]) + hr.process(b.r[i]);
+        float m = ml.process(b.l[i]) + mr.process(b.r[i]);
+        hi += double(h) * h; mid += double(m) * m;
+    }
+    return float(std::sqrt(hi / (mid + 1e-12)));
+}
+
 double rmsOf(const StereoBuffer& b) {
     if (b.empty()) return 0.0;
     double a = 0.0;
@@ -288,8 +312,19 @@ StereoBuffer masterize(const StereoBuffer& premaster, const Plan& plan,
     // (~9 kHz) for the crisp, expensive top the references have. Slightly less
     // on very dark palettes so it never gets harsh.
     {
-        const double presDb = 3.0 - double(plan.darkness01) * 1.0;   // +2..+3 dB
-        const double airDb  = 5.0 - double(plan.darkness01) * 1.5;   // +3.5..+5 dB
+        // PERCEPTUAL brightness feedback: measure how bright the mix already is
+        // (hi-share proxy for sharpness) and SCALE the air/presence boost toward
+        // a target so an already-bright/harsh source isn't over-brightened (the
+        // fixed +5 dB air pushed some masters ~20% too sharp vs the references).
+        const float hiShare = measureHiShare(base, sampleRate);
+        // Target hi/mid balance (>3.5k vs >500Hz), reference-calibrated (~0.35);
+        // darker palettes aim lower. Error drives an air BOOST when too dark or a
+        // CUT when too bright, so the master converges on a perceptually balanced
+        // top instead of a fixed +5 dB that over-brightened bright sources.
+        const float target = 0.40f - float(plan.darkness01) * 0.12f;
+        const float err = (target - hiShare) / target;         // +ve = too dark, -ve = too bright
+        const double airDb  = std::clamp(err * 8.0f, -4.0f, 5.0f);
+        const double presDb = std::clamp(err * 5.0f, -3.0f, 3.0f);
         Biquad prL = highShelf(sampleRate, 3500.0, presDb), prR = prL;
         Biquad arL = highShelf(sampleRate, 9000.0, airDb),  arR = arL;
         for (size_t i = 0; i < n; ++i) {
