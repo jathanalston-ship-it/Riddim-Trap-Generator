@@ -986,52 +986,78 @@ void Comp::composeIntro(const Section& s, int idx, Rng& r) {
     // the low end SLAMS in only when the drop hits (ref: Seleman's intro).
     if (riddim) {
         const int bars = std::max(1, s.bars);
-        static const int popDeg[] = {0, 0, 3, 0, 5, 3, 0, -2};   // horn-pop phrase
-        static const int tomDeg[] = {0, 4, 2, 4, 0, 5, 4, 2};    // tuned-tom phrase
-        auto tom = [&](int deg) { return scalePitch(rootMid + 12, deg); }; // ~150-260 Hz bongo/tom
-        for (int b = 0; b < bars; ++b) {
+        static const int popDeg[]  = {0, 0, 3, 0, 5, 3, 0, -2};   // horn-pop phrase
+        static const int tomDeg[]  = {0, 4, 2, 4, 0, 5, 4, 2};    // tuned-tom phrase
+        static const int stabDeg[] = {0, 0, 5, 0, 2, 0, 6, 5};    // DARK minor stab: root/b6/b3/b7
+        auto tom = [&](int deg) { return scalePitch(rootMid + 12, deg); };
+
+        // OPENING (first bar, when there's room): a distorted noise/synth that
+        // COALESCES and CRASHES into the toms — no drums yet, a rising noise +
+        // dark sustained synth swell, then an impact + crash land on the downbeat
+        // where the fast toms hit (ref Seleman: noise -> crash -> instant toms).
+        int tomStart = 0;
+        if (bars >= 4) {
+            tomStart = 1;
+            add(Lane::Riser, bb0, 1.0 * BPB, plan.rootMidi + 28, 0.62f, 0.9f);          // rising noise swell
+            add(Lane::Pad, bb0, 1.0 * BPB + 1.0, scalePitch(rootMid, 0), 0.5f, 0.2f);   // dark sustained synth coalescing
+            add(Lane::Downlifter, bb0 + 1.5, 2.0, plan.rootMidi + 22, 0.5f, 0.7f);      // distorted sweep
+            add(Lane::Impact, double(s.startBar + 1) * BPB, 1.0, rootSub, 1.0f, 1.0f);  // crash-in
+            add(Lane::Crash, double(s.startBar + 1) * BPB, 2.0, 49, 0.72f, 0.5f);
+        }
+
+        for (int b = tomStart; b < bars; ++b) {
             const double bb = (s.startBar + b) * BPB;
             const bool last = (b == bars - 1);
-            const float prog = bars > 1 ? float(b) / float(bars - 1) : 1.0f; // 0..1 build
+            const int span = std::max(1, bars - tomStart);
+            const float prog = span > 1 ? float(b - tomStart) / float(span - 1) : 1.0f;
 
             if (!last) {
-                // Deep timpani (low tom) + a kick for weight on the downbeat.
-                add(Lane::Kick, bb + 0.0, 0.6, tom(0) - 12, hvel(r, 0.95f, 0.04f)); // low timpani
-                add(Lane::Kick, bb + 0.0, 0.28, rootSub, hvel(r, 0.82f, 0.05f));    // sub weight
-                if (r.chance(0.5 + 0.4f * prog))
+                // Deep timpani + kick weight on the downbeat.
+                add(Lane::Kick, bb + 0.0, 0.6, tom(0) - 12, hvel(r, 0.95f, 0.04f));
+                add(Lane::Kick, bb + 0.0, 0.28, rootSub, hvel(r, 0.82f, 0.05f));
+                if (r.chance(0.6 + 0.3f * prog))
                     add(Lane::Kick, bb + 2.0, 0.5, tom(2) - 12, hvel(r, 0.78f, 0.05f));
 
-                // Driving tribal TOMS on the 8ths (tuned phrase), building fills.
+                // FAST tuned TOMS from the very first bar (busy off the rip = instant
+                // tension, per the reference), a touch busier still as it builds.
                 for (int e = 0; e < 8; ++e) {
                     const bool onBeat = (e % 2) == 0;
-                    if (!onBeat && !r.chance(0.32 + 0.55f * prog)) continue;
+                    if (!onBeat && !r.chance(0.6 + 0.3f * prog)) continue;
                     add(Lane::Kick, mt(r, bb + e * 0.5), 0.42, tom(tomDeg[e & 7]),
-                        hvel(r, (onBeat ? 0.82f : 0.55f) * (0.72f + 0.28f * prog), 0.05f));
-                    // 16th roll fill after the beat as it builds.
-                    if (onBeat && prog > 0.45f && r.chance(0.5f * prog))
+                        hvel(r, (onBeat ? 0.85f : 0.6f) * (0.82f + 0.18f * prog), 0.05f));
+                    if (r.chance(0.25 + 0.4f * prog))   // 16th roll fills
                         add(Lane::Kick, bb + e * 0.5 + 0.25, 0.3,
                             tom(tomDeg[(e + 1) & 7]), hvel(r, 0.5f, 0.05f));
                 }
 
-                // Light hats + soft shaker (thinner than the drop's).
-                addRiddimHatBar(bb, r, 0.4f + 0.4f * prog, 3);
+                // Busy hats + shaker (fast-paced intro).
+                addRiddimHatBar(bb, r, 0.6f + 0.35f * prog, 2);
                 for (int sub = 1; sub < 16; sub += 2)
-                    if (r.chance(0.30 + 0.30f * prog))
-                        add(Lane::Perc, mt(r, bb + sub * 0.25), 0.11, 37,
-                            hvel(r, 0.28f, 0.05f), 0.4f);          // shaker
+                    if (r.chance(0.4 + 0.3f * prog))
+                        add(Lane::Perc, mt(r, bb + sub * 0.25), 0.11, 37, hvel(r, 0.28f, 0.05f), 0.4f);
 
-                // Aggressive synth-horn POPS in the back half, building.
-                if (prog > 0.30f) {
+                // DARK cyberpunk synth STAB (minor tones, mid-high register) — the
+                // intro's creepy melodic hook, present from the first tom bar. Mod
+                // varies per hit for filter/timbre movement.
+                for (int e = 0; e < 8; ++e) {
+                    if (!r.chance(0.30 + 0.15f * prog)) continue;
+                    add(Lane::Melody, mt(r, bb + e * 0.5), r.chance(0.5) ? 0.25 : 0.45,
+                        scalePitch(rootMid + 24, stabDeg[e & 7]), hvel(r, 0.5f, 0.06f),
+                        0.15f + 0.4f * float(r.uniform()));
+                }
+
+                // Horn pops accent in the back half.
+                if (prog > 0.4f) {
                     for (int e = 0; e < 8; ++e) {
-                        if (!r.chance(0.18 + 0.55f * prog)) continue;
+                        if (!r.chance(0.2 + 0.4f * prog)) continue;
                         add(Lane::BassB, mt(r, bb + e * 0.5), 0.18,
                             scalePitch(rootMid, popDeg[e & 7]),
-                            hvel(r, 0.55f + 0.35f * prog, 0.06f),
-                            std::min(1.0f, 0.62f + 0.40f * prog));
+                            hvel(r, 0.55f + 0.3f * prog, 0.06f),
+                            std::min(1.0f, 0.62f + 0.4f * prog));
                     }
                 }
             } else {
-                // LAST BAR: accelerating TOM roll (rising pitch + velocity) slam.
+                // LAST BAR: accelerating TOM roll slam into the drop.
                 for (int k = 0; k < 16; ++k) {
                     const float f = float(k) / 15.0f;
                     add(Lane::Kick, bb + k * 0.25, 0.28,
@@ -1042,7 +1068,6 @@ void Comp::composeIntro(const Section& s, int idx, Rng& r) {
                 add(Lane::Kick, bb + 0.0, 0.6, tom(0) - 12, hvel(r, 0.95f, 0.04f));
             }
         }
-        // Rising riser across the whole buildup into the drop.
         add(Lane::Riser, bb0, double(bars) * BPB, plan.rootMidi + 34, 0.55f, 0.85f);
         add(Lane::Crash, double(s.startBar + bars) * BPB - 0.02, 1.6, 49, 0.6f, 0.5f);
         return;
