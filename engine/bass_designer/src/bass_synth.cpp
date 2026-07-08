@@ -638,6 +638,21 @@ Recipe makeSubRecipe(float aggr, float dark, float nov, Rng& rng) {
     p["ampSus"]    = rng.rangef(0.34f, 0.46f);                     // clear attack->decay chug shape, not a drone
     p["ampRel"]    = rng.rangef(0.04f, 0.08f);                     // rings out shorter between hits
     p["gain"]      = 0.72f;
+    // WALL vs PUMP (post-hoc, no new rng -> determinism preserved). A dense/DARK
+    // reference (low crest — Seleman ~4) has a CONTINUOUS sub WALL, not a pumping
+    // boom-with-a-gap: raise the sustain and slow the release so the sub HOLDS
+    // between hits (paired with the composer's legato sub in wall mode). Our
+    // gapped sub measured ~13 dB low-crest vs the reference's ~5; a held wall
+    // fills the low band so the kick no longer spikes it. No calibration -> the
+    // punchy gapped/pumping sub is unchanged.
+    if (const auto& cal = rtg::Calibration::active(); cal.has_value()) {
+        const CalibrationProfile& fp = cal->forGenre(rtg::Genre::Riddim);
+        if (fp.present && fp.crestDb > 0.0f && fp.crestDb < 6.0f) {
+            p["ampSus"] = 0.82f;                                   // hold -> wall, not a decaying chug
+            p["ampDec"] = clampf(p["ampDec"] * 1.6f, 0.06f, 0.16f);
+            p["ampRel"] = clampf(p["ampRel"] * 3.0f, 0.10f, 0.25f);
+        }
+    }
     return r;
 }
 

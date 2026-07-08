@@ -5,6 +5,7 @@
 #include "rtg/composition/score.h"
 #include "rtg/utils/rng.h"
 #include "rtg/drums/drum_profile.h"   // DrumProfile::active().hatDensityPerBeat
+#include "rtg/decision/calibration.h" // Calibration::active() — sub-wall vs pump
 
 #include <algorithm>
 #include <array>
@@ -516,13 +517,30 @@ void Comp::addSubFollow(const Section& s, int skipFirstBar) {
         const auto& growl = score.notes(Lane::BassA);
         const double lo = (s.startBar + skipFirstBar) * BPB;
         const double hi = (s.startBar + s.bars) * BPB;
-        for (const Note& n : growl) {
-            if (n.startBeat < lo - 1e-6 || n.startBeat >= hi - 1e-6) continue;
+        // WALL vs PUMP: a dense/DARK reference (low crest — Seleman ~4, measured
+        // low-band crest ~5 dB) has a CONTINUOUS sub WALL, not gapped pumping
+        // stabs; a peaky/pumping reference ducks to near-zero. When such a dense
+        // reference is calibrated, make the sub LEGATO so each note bridges to the
+        // next — a relentless wall (our gapped sub measured crest ~13 dB vs the
+        // reference's ~5). With no such calibration, keep the punchy gapped sub
+        // that pumps under the kick (default render unchanged: wall stays false).
+        bool wall = false;
+        if (const auto& cal = rtg::Calibration::active(); cal.has_value()) {
+            const CalibrationProfile& fp = cal->forGenre(rtg::Genre::Riddim);
+            if (fp.present && fp.crestDb > 0.0f && fp.crestDb < 6.0f) wall = true;
+        }
+        std::vector<const Note*> ns;
+        for (const Note& n : growl)
+            if (n.startBeat >= lo - 1e-6 && n.startBeat < hi - 1e-6) ns.push_back(&n);
+        for (size_t i = 0; i < ns.size(); ++i) {
+            const Note& n = *ns[i];
             int subMidi = n.midi - 12;                    // one octave below the growl
             while (subMidi > rootSub + 5) subMidi -= 12;  // fold to stay in the deep octave
-            // Follow the chug rhythm; the sub synth's soft attack + decay/release
-            // shapes each hit into a boom. Slightly longer than the stab, clamped.
-            const double len = std::clamp(n.lengthBeats * 1.25, 0.14, 0.55);
+            double len;
+            if (wall && i + 1 < ns.size())
+                len = std::clamp((ns[i + 1]->startBeat - n.startBeat) * 0.98, 0.14, 1.5); // bridge -> wall
+            else
+                len = std::clamp(n.lengthBeats * 1.25, 0.14, 0.55);                        // gapped -> pump
             add(Lane::Sub, n.startBeat, len, subMidi, n.velocity, 0.12f);
         }
         return;
