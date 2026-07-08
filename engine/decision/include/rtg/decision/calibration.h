@@ -39,6 +39,10 @@ struct CalibrationProfile {
     float growlOdd        = 0.6f;    // odd-harmonic fraction of the loud bass, 0..1 (square wave => high, ~>0.7)
     float growlWobbleHz   = 0.0f;    // dominant growl-band envelope-modulation (wobble/gate) rate, Hz; 0 = unknown
     float growlCentroidHz = 2200.0f; // growl-band (120-8kHz) spectral centroid, Hz (brightness)
+    // Perceptual targets (the "ears"): the generation loops steer toward these
+    // when a reference is loaded. 0 => unmeasured, use engine defaults.
+    float hiShare   = 0.0f;   // perceived brightness: RMS>3.5k / RMS>500Hz (Zwicker-sharpness proxy)
+    float roughness = 0.0f;   // perceived gnarl: 15-150Hz amplitude-modulation / carrier
     int   refCount = 0;                    // number of reference files aggregated
 };
 
@@ -55,6 +59,8 @@ struct RefMeasurement {
     float growlOdd        = 0.6f;    // odd-harmonic fraction of the loud bass, 0..1 (square wave => high, ~>0.7)
     float growlWobbleHz   = 0.0f;    // dominant growl-band envelope-modulation (wobble/gate) rate, Hz; 0 = unknown
     float growlCentroidHz = 2200.0f; // growl-band (120-8kHz) spectral centroid, Hz (brightness)
+    float hiShare   = 0.0f;   // perceived brightness (RMS>3.5k / RMS>500Hz)
+    float roughness = 0.0f;   // perceived gnarl (15-150Hz AM / carrier)
 };
 
 // Selector for assignProfile / the analyzer: which slot a freshly aggregated

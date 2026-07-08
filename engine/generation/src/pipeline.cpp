@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "rtg/decision/calibration.h"
 #include "rtg/library/preference_model.h"
 #include "rtg/mix/mix_engine.h"
 #include "rtg/synth/synth_engine.h"
@@ -46,7 +47,16 @@ RatedSound synthesizeBest(Role role, const PaletteSpec& pal, const Plan& plan,
     // detune/distortion, selecting by roughness-nearness effectively tunes those
     // params to the target — the right place to close this loop (the mix can't).
     const bool roughRole = (role == Role::Growl || role == Role::Screech || role == Role::Sub);
-    const float roughTarget = 0.28f + 0.30f * pal.aggression01;
+    float roughTarget = 0.28f + 0.30f * pal.aggression01;
+    // When a reference is loaded, scale the (isolated-preview) roughness target
+    // by the reference's measured full-mix roughness relative to a nominal, so a
+    // gnarlier reference asks for a gnarlier growl. kMap maps the full-mix scale
+    // to the preview scale (calibrated: Seleman full-mix ~0.21 -> preview ~0.50).
+    if (const auto& cal = Calibration::active()) {
+        const auto& prof = cal->forGenre(plan.params.genre);
+        if (prof.present && prof.roughness > 0.01f)
+            roughTarget = std::clamp(prof.roughness * 2.4f, 0.20f, 0.85f);
+    }
     const bool dbg = std::getenv("RTG_SYNTH_DEBUG") != nullptr;
     for (int k = 0; k < 6; ++k) {
         Recipe rec;

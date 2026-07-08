@@ -432,8 +432,67 @@ CalibrationProfile meanProfile(const CalibrationProfile& a, const CalibrationPro
     o.growlOdd = avg(a.growlOdd, b.growlOdd);
     o.growlWobbleHz = avg(a.growlWobbleHz, b.growlWobbleHz);
     o.growlCentroidHz = avg(a.growlCentroidHz, b.growlCentroidHz);
+    o.hiShare = avg(a.hiShare, b.hiShare);
+    o.roughness = avg(a.roughness, b.roughness);
     o.refCount = a.refCount + b.refCount;
     return o;
+}
+
+// --- Perceptual measures (match the engine's runtime "ears" so a reference's
+// measured value can be used directly as the loop target) --------------------
+// RBJ 2nd-order high-pass (Q=0.707), same as the master's measureHiShare.
+struct HP2 {
+    double b0=1,b1=0,b2=0,a1=0,a2=0,z1=0,z2=0;
+    HP2(double fs,double f0){ double w=2*M_PI*f0/fs,c=std::cos(w),s=std::sin(w),al=s/(2*0.70710678);
+        double a0=1+al; b0=((1+c)/2)/a0; b1=(-(1+c))/a0; b2=((1+c)/2)/a0; a1=(-2*c)/a0; a2=(1-al)/a0; }
+    inline float p(float x){ double y=b0*x+z1; z1=b1*x-a1*y+z2; z2=b2*x-a2*y; return float(y); }
+};
+
+// Loudest ~4 s window (the drop) by low+mid energy — the perceptually-defining
+// region, so a bright break can't skew a reference's perceptual target.
+std::pair<size_t,size_t> loudestWindow(const StereoBuffer& b, double fs, double secs=4.0) {
+    const size_t n=b.size(), wl=std::min(n,size_t(secs*fs)), hop=std::max<size_t>(1,size_t(0.5*fs));
+    if (n<=wl) return {0,n};
+    // Select by SUB energy (one-pole LP ~120 Hz) so we land on the sub-heavy DROP,
+    // not a loud-but-bright break — matching the "eyes" drop_window picker.
+    std::vector<float> lo(n); float z=0; const float a=float(std::exp(-2.0*M_PI*120.0/fs));
+    for (size_t i=0;i<n;++i){ float m=0.5f*(b.l[i]+b.r[i]); z=a*z+(1-a)*m; lo[i]=z; }
+    double best=-1; size_t s0=0;
+    for (size_t s=0;s+wl<=n;s+=hop){
+        double e=0; for (size_t i=s;i<s+wl;i+=32) e+=double(lo[i])*lo[i];
+        if (e>best){best=e;s0=s;}
+    }
+    return {s0,s0+wl};
+}
+
+// Perceived brightness (>3.5k / >500Hz RMS) on the drop — matches master::measureHiShare.
+float measureHiShareRef(const StereoBuffer& b, double fs) {
+    if (b.empty()) return 0.0f;
+    auto [s0,s1]=loudestWindow(b,fs);
+    HP2 hl(fs,3500.0), hr(fs,3500.0), ml(fs,500.0), mr(fs,500.0);
+    double hi=0, mid=0;
+    for (size_t i=s0;i<s1;++i){
+        float h=hl.p(b.l[i])+hr.p(b.r[i]), m=ml.p(b.l[i])+mr.p(b.r[i]);
+        hi+=double(h)*h; mid+=double(m)*m;
+    }
+    return float(std::sqrt(hi/(mid+1e-12)));
+}
+
+// Perceived roughness (15-150Hz AM / carrier) on the drop — matches synth::analyze.
+float measureRoughnessRef(const StereoBuffer& b, double fs) {
+    if (b.empty()) return 0.0f;
+    auto [rs0,rs1]=loudestWindow(b,fs);
+    const float aE=float(std::exp(-1.0/(0.002*fs)));
+    const float aHp=float(std::exp(-2.0*M_PI*15.0/fs)), aLp=float(std::exp(-2.0*M_PI*150.0/fs));
+    float env=0,hpPrev=0,hpOut=0,lpOut=0; double modE=0,car=0;
+    for (size_t i=rs0;i<rs1;++i){
+        float s=0.5f*(b.l[i]+b.r[i]); float e=std::fabs(s);
+        env=aE*env+(1-aE)*e;
+        hpOut=aHp*(hpOut+env-hpPrev); hpPrev=env;
+        lpOut=lpOut+(1-aLp)*(hpOut-lpOut);
+        modE+=double(lpOut)*lpOut; car+=double(env)*env;
+    }
+    return float(std::sqrt(modE/(car+1e-12)));
 }
 
 } // namespace
@@ -446,6 +505,8 @@ RefMeasurement Calibration::measureReference(const StereoBuffer& audio48k, doubl
     m.contrastLu = measureContrastLu(audio48k, sampleRate);
     m.tiltDbPerOct = measureSpectralTiltDbPerOct(audio48k, sampleRate);
     m.width = measureStereoWidth(audio48k);
+    m.hiShare = measureHiShareRef(audio48k, sampleRate);
+    m.roughness = measureRoughnessRef(audio48k, sampleRate);
     GrowlFingerprint gf = measureGrowlFingerprint(audio48k, sampleRate);
     m.growlOdd = gf.odd;
     m.growlWobbleHz = gf.wobbleHz;
@@ -457,7 +518,7 @@ CalibrationProfile Calibration::aggregate(const std::vector<RefMeasurement>& mea
     CalibrationProfile prof;
     if (measurements.empty()) { prof.present = false; return prof; }
 
-    std::vector<float> vLufs, vCrest, vContrast, vTilt, vWidth, vGOdd, vGWob, vGCen;
+    std::vector<float> vLufs, vCrest, vContrast, vTilt, vWidth, vGOdd, vGWob, vGCen, vHi, vRough;
     std::array<std::vector<float>, kCalBands> vBands;
     for (const auto& r : measurements) {
         vLufs.push_back(r.lufs);
@@ -468,6 +529,8 @@ CalibrationProfile Calibration::aggregate(const std::vector<RefMeasurement>& mea
         vGOdd.push_back(r.growlOdd);
         vGWob.push_back(r.growlWobbleHz);
         vGCen.push_back(r.growlCentroidHz);
+        vHi.push_back(r.hiShare);
+        vRough.push_back(r.roughness);
         for (int b = 0; b < kCalBands; ++b) vBands[b].push_back(r.bands[b]);
     }
 
@@ -481,6 +544,8 @@ CalibrationProfile Calibration::aggregate(const std::vector<RefMeasurement>& mea
     prof.growlOdd = medianOf(vGOdd);
     prof.growlWobbleHz = medianOf(vGWob);
     prof.growlCentroidHz = medianOf(vGCen);
+    prof.hiShare = medianOf(vHi);
+    prof.roughness = medianOf(vRough);
     float s = 0.0f;
     for (int b = 0; b < kCalBands; ++b) { prof.bands[b] = medianOf(vBands[b]); s += prof.bands[b]; }
     if (s > 1e-6f) for (int b = 0; b < kCalBands; ++b) prof.bands[b] /= s;   // re-normalize
@@ -522,6 +587,8 @@ void writeProfile(std::ostream& os, const char* prefix, const CalibrationProfile
     kv("growlOdd", p.growlOdd);
     kv("growlWobbleHz", p.growlWobbleHz);
     kv("growlCentroidHz", p.growlCentroidHz);
+    kv("hiShare", p.hiShare);
+    kv("roughness", p.roughness);
     kv("refCount", p.refCount);
 }
 
@@ -571,6 +638,8 @@ void readProfile(const std::map<std::string, double>& m, const char* prefix, Cal
     p.growlOdd = get("growlOdd", p.growlOdd);
     p.growlWobbleHz = get("growlWobbleHz", p.growlWobbleHz);
     p.growlCentroidHz = get("growlCentroidHz", p.growlCentroidHz);
+    p.hiShare = get("hiShare", p.hiShare);
+    p.roughness = get("roughness", p.roughness);
     p.refCount = int(std::lround(get("refCount", float(p.refCount))));
 }
 

@@ -76,10 +76,25 @@ Biquad highPass(double fs, double f0, double Q = 0.707) {
 // auto-scale the master air so already-bright material isn't over-brightened.
 float measureHiShare(const StereoBuffer& b, double fs) {
     if (b.empty()) return 0.0f;
+    // Measure on the loudest ~4 s (the drop), consistent with the reference
+    // measure, so bright intros/breaks don't skew the runtime brightness.
+    const size_t n = b.size(), wl = std::min(n, size_t(4.0 * fs));
+    const size_t hop = std::max<size_t>(1, size_t(0.5 * fs));
+    size_t s0 = 0; double best = -1.0;
+    if (n > wl) {
+        // select by SUB energy (one-pole LP ~120 Hz) -> lands on the drop
+        std::vector<float> lo(n); float z = 0.0f; const float a = float(std::exp(-2.0 * kPi * 120.0 / fs));
+        for (size_t i = 0; i < n; ++i) { float m = 0.5f * (b.l[i] + b.r[i]); z = a * z + (1.0f - a) * m; lo[i] = z; }
+        for (size_t s = 0; s + wl <= n; s += hop) {
+            double e = 0.0; for (size_t i = s; i < s + wl; i += 32) e += double(lo[i]) * lo[i];
+            if (e > best) { best = e; s0 = s; }
+        }
+    }
+    const size_t s1 = std::min(n, s0 + wl);
     Biquad hl = highPass(fs, 3500.0), hr = highPass(fs, 3500.0);
     Biquad ml = highPass(fs, 500.0),  mr = highPass(fs, 500.0);
     double hi = 0.0, mid = 0.0;
-    for (size_t i = 0; i < b.size(); ++i) {
+    for (size_t i = s0; i < s1; ++i) {
         float h = hl.process(b.l[i]) + hr.process(b.r[i]);
         float m = ml.process(b.l[i]) + mr.process(b.r[i]);
         hi += double(h) * h; mid += double(m) * m;
@@ -317,10 +332,13 @@ StereoBuffer masterize(const StereoBuffer& premaster, const Plan& plan,
         // a target so an already-bright/harsh source isn't over-brightened (the
         // fixed +5 dB air pushed some masters ~20% too sharp vs the references).
         const float hiShare = measureHiShare(base, sampleRate);
-        // Target hi/mid balance (>3.5k vs >500Hz), reference-calibrated (~0.35);
-        // darker palettes aim lower. Error drives an air BOOST when too dark or a
-        // CUT when too bright, so the master converges on a perceptually balanced
-        // top instead of a fixed +5 dB that over-brightened bright sources.
+        // Target hi/mid balance (>3.5k vs >500Hz), on a perceptually-tuned default
+        // (darker palettes aim lower). NOTE: this HP-ratio is a good runtime
+        // CONTROL but a poor cross-track perceptual target (its gentle rolloff
+        // leaks mids, so different tracks hit the same ratio at different real
+        // brightness) — so brightness is NOT slaved to a loaded reference here;
+        // crest + roughness are (they correlate cleanly). A proper Bark/Zwicker
+        // sharpness measure would let brightness track a reference too.
         const float target = 0.40f - float(plan.darkness01) * 0.12f;
         const float err = (target - hiShare) / target;         // +ve = too dark, -ve = too bright
         const double airDb  = std::clamp(err * 8.0f, -4.0f, 5.0f);
