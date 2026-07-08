@@ -40,6 +40,14 @@ RatedSound synthesizeBest(Role role, const PaletteSpec& pal, const Plan& plan,
                           const PreferenceModel* prefs) {
     RatedSound best; best.score = -1.0f;
     float bestSel = -1.0f;
+    // Perceptual ROUGHNESS loop (closed at synth time, where roughness is created):
+    // for the aggressive bass roles, bias candidate selection toward a target
+    // gnarl that scales with aggression. Because the candidates vary their
+    // detune/distortion, selecting by roughness-nearness effectively tunes those
+    // params to the target — the right place to close this loop (the mix can't).
+    const bool roughRole = (role == Role::Growl || role == Role::Screech || role == Role::Sub);
+    const float roughTarget = 0.28f + 0.30f * pal.aggression01;
+    const bool dbg = std::getenv("RTG_SYNTH_DEBUG") != nullptr;
     for (int k = 0; k < 6; ++k) {
         Recipe rec;
         if (k < 2 && seedParent)
@@ -50,6 +58,10 @@ RatedSound synthesizeBest(Role role, const PaletteSpec& pal, const Plan& plan,
         Features f = synth::analyze(prev, sr);
         float rated = synth::rate(role, f);
         float sel = prefs ? (0.65f * rated + 0.35f * prefs->score(f)) : rated;
+        if (roughRole && f.roughness > 0.0f)
+            sel -= 0.7f * std::fabs(f.roughness - roughTarget);   // prefer target gnarl
+        if (dbg) std::fprintf(stderr, "[synth] role=%d k=%d roughness=%.3f (target %.2f) sel=%.3f\n",
+                              int(role), k, f.roughness, roughTarget, sel);
         if (sel > bestSel) {
             bestSel = sel;
             best = RatedSound{}; best.recipe = rec; best.features = f; best.score = rated;

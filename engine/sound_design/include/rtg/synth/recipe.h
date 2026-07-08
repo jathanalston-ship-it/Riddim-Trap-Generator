@@ -35,6 +35,7 @@ struct Features {
     float aggression = 0.0f;     // distortion density + high-mid energy 0..1
     float darkness = 0.0f;       // inverse tilt 0..1
     float movement = 0.0f;       // 0.5–8 Hz modulation energy 0..1 (growl talk)
+    float roughness = 0.0f;      // 15–150 Hz amplitude-modulation / carrier (perceived gnarl/aggression)
     float subRatio = 0.0f;       // energy share below 120 Hz 0..1
     float transient = 0.0f;      // onset strength 0..1
     float crestDb = 0.0f;        // peak/rms in dB

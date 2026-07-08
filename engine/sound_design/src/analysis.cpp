@@ -65,6 +65,27 @@ Features analyze(const StereoBuffer& audio, double sampleRate) {
     float zcr = float(double(zc) / double(n)); // ~roughness proxy
     float dcOffset = float(std::fabs(dcSum / double(n)) / std::max(peak, 1e-9));
 
+    // ROUGHNESS: perceived gnarl/aggression = amplitude modulation in the 15-150
+    // Hz band of the signal envelope, relative to the carrier. Needs a sample-
+    // domain envelope (the STFT frame rate can't reach 150 Hz). One-pole env
+    // follower (~2 ms) then a one-pole HP@15 + LP@150 on the envelope.
+    {
+        const double sr = sampleRate;
+        const float aE  = float(std::exp(-1.0 / (0.002 * sr)));      // 2 ms envelope
+        const float aHp = float(std::exp(-2.0 * kPi * 15.0 / sr));
+        const float aLp = float(std::exp(-2.0 * kPi * 150.0 / sr));
+        float env = 0.0f, hpPrev = 0.0f, hpOut = 0.0f, lpOut = 0.0f;
+        double modE = 0.0, car = 0.0;
+        for (size_t i = 0; i < n; ++i) {
+            float e = std::fabs(mono[i]);
+            env = aE * env + (1.0f - aE) * e;
+            hpOut = aHp * (hpOut + env - hpPrev); hpPrev = env;      // one-pole HP @15
+            lpOut = lpOut + (1.0f - aLp) * (hpOut - lpOut);          // one-pole LP @150
+            modE += double(lpOut) * lpOut; car += double(env) * env;
+        }
+        f.roughness = float(std::sqrt(modE / (car + 1e-12)));
+    }
+
     // Encode near-silence / DC as centroid=0 so rate() can gate.
     if (rms < 3.16e-3 /* -50 dBFS */ || dcOffset > 0.6f) {
         f.centroidHz = 0.0f;
