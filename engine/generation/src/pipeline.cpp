@@ -151,6 +151,42 @@ std::optional<GenerationResult> generateTrack(const Params& params,
         }
     }
 
+    // --- [3b] Per-drop bass timbre --------------------------------------------
+    // The tonal bass lanes (growl / horn / 3rd voice) get a DISTINCT synthesized
+    // recipe per palette, so each drop sounds like its own patch instead of the
+    // whole track sharing one growl. Deterministic: a fresh child rng per
+    // (lane, palette). Other lanes keep their single recipe. Variants are not
+    // ingested (per-track ephemeral); palette 0 reuses the already-chosen recipe.
+    const int nPal = int(plan.palettes.size());
+    auto isVariableLane = [](int li) {
+        return li == int(Lane::BassA) || li == int(Lane::BassB) || li == int(Lane::BassC);
+    };
+    std::array<std::vector<Recipe>, kLaneCount> paletteRecipes;
+    if (nPal > 1) {
+        for (int li = 0; li < kLaneCount; ++li) {
+            if (!laneActive[li] || !isVariableLane(li)) continue;
+            Role role = roleForLane(Lane(li), genre);
+            paletteRecipes[li].resize(nPal);
+            for (int pi = 0; pi < nPal; ++pi) {
+                if (pi == 0) { paletteRecipes[li][0] = laneRecipe[li]; continue; }
+                Rng rng2 = Rng(p.seed).stream("sounds", li).stream("palvar", pi);
+                RatedSound v = synthesizeBest(role, plan.palettes[pi], plan, nullptr,
+                                              rng2, sr, prefsPtr);
+                paletteRecipes[li][pi] = v.recipe;
+            }
+        }
+    }
+    // paletteIndex for an absolute beat (which section owns it).
+    const double bpbBeats = plan.beatsPerBar;
+    auto paletteForBeat = [&](double beat) -> int {
+        for (const Section& s : plan.sections) {
+            const double a = s.startBar * bpbBeats, b = (s.startBar + s.bars) * bpbBeats;
+            if (beat >= a - 1e-6 && beat < b - 1e-6)
+                return std::clamp(s.paletteIndex, 0, std::max(0, nPal - 1));
+        }
+        return 0;
+    };
+
     // --- [4] Render (parallel over lanes) ----------------------------------
     if (cancelled()) return std::nullopt;
     std::array<StereoBuffer, kLaneCount> laneAudio;
@@ -159,9 +195,31 @@ std::optional<GenerationResult> generateTrack(const Params& params,
 
     std::array<std::future<StereoBuffer>, kLaneCount> futures;
     for (int li : renderLanes) {
-        futures[li] = std::async(std::launch::async, [&, li] {
-            return synth::renderLane(Lane(li), score.notes(Lane(li)), laneRecipe[li],
-                                     plan, score, sr);
+        const bool perDrop = (nPal > 1) && isVariableLane(li) && !paletteRecipes[li].empty();
+        futures[li] = std::async(std::launch::async, [&, li, perDrop] {
+            if (!perDrop) {
+                return synth::renderLane(Lane(li), score.notes(Lane(li)), laneRecipe[li],
+                                         plan, score, sr);
+            }
+            // Render each palette's note-subset with its own recipe; sum. Each
+            // renderLane call returns a full-length buffer with notes placed at
+            // their absolute positions, so summing reconstructs the whole lane.
+            const auto& allNotes = score.notes(Lane(li));
+            StereoBuffer acc;
+            for (int pi = 0; pi < nPal; ++pi) {
+                std::vector<Note> sub;
+                for (const Note& nt : allNotes)
+                    if (paletteForBeat(nt.startBeat) == pi) sub.push_back(nt);
+                if (sub.empty()) continue;
+                StereoBuffer part = synth::renderLane(Lane(li), sub, paletteRecipes[li][pi],
+                                                      plan, score, sr);
+                if (acc.empty()) { acc = std::move(part); continue; }
+                const size_t m = std::min(acc.size(), part.size());
+                for (size_t i = 0; i < m; ++i) { acc.l[i] += part.l[i]; acc.r[i] += part.r[i]; }
+            }
+            if (acc.empty())  // safety: no notes mapped -> fall back to one recipe
+                acc = synth::renderLane(Lane(li), allNotes, laneRecipe[li], plan, score, sr);
+            return acc;
         });
     }
     // Collect in lane order; progress reported only from this orchestrating thread.
