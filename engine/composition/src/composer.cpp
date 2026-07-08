@@ -1159,6 +1159,49 @@ void Comp::composeBuild(const Section& s, int idx, Rng& r) {
     // Bass mostly silent; a touch early, silent last 2 bars.
     if (plan.melody01 > 0.8f) addMotif(s.startBar, bars - 2, r, false); // build arps
 
+    // RIDDIM build (modeled on Seleman): the SUB/bass stays OUT (tension) but the
+    // jungle drums KEEP DRIVING and rise in intensity — driving kicks/toms, busy
+    // hats + shaker, ghost snares — under the riser sweep, then the last bar is an
+    // accelerating breakbeat/tom fill that slams into the drop (composeDrop cuts a
+    // short pre-drop gap for the fakeout). No mechanical snare-roll doubling.
+    if (riddim) {
+        static const int tomDeg[] = {0, 4, 2, 4, 0, 5, 4, 2};
+        auto tom = [&](int d) { return scalePitch(rootMid + 12, d); };
+        for (int b = 0; b < bars; ++b) {
+            const double bb = (s.startBar + b) * BPB;
+            const bool last = (b == bars - 1);
+            const float prog = bars > 1 ? float(b) / float(bars - 1) : 1.0f;
+            if (!last) {
+                add(Lane::Kick, bb + 0.0, 0.3, rootSub, hvel(r, 0.9f, 0.05f));
+                add(Lane::Snare, bb + 1.0, 0.22, 38, hvel(r, 0.9f, 0.05f));
+                add(Lane::Snare, bb + 3.0, 0.22, 38, hvel(r, 0.9f, 0.05f));
+                addRiddimHatBar(bb, r, 0.55f + 0.4f * prog, 2);
+                for (int e = 0; e < 8; ++e) {
+                    if (r.chance(0.28 + 0.5f * prog))     // driving toms, busier as it builds
+                        add(Lane::Kick, mt(r, bb + e * 0.5), 0.32, tom(tomDeg[e & 7]),
+                            hvel(r, (0.45f + 0.35f * prog) * ((e % 2) ? 0.8f : 1.0f), 0.05f));
+                    if ((e % 2) == 1 && r.chance(0.18 + 0.5f * prog))
+                        add(Lane::Snare, mt(r, bb + e * 0.5), 0.1, 38,
+                            hvel(r, 0.28f + 0.3f * prog, 0.06f));  // jungle ghost snares
+                }
+                for (int sub = 1; sub < 16; sub += 2)
+                    if (r.chance(0.35 + 0.3f * prog))
+                        add(Lane::Perc, mt(r, bb + sub * 0.25), 0.1, 37, hvel(r, 0.28f, 0.05f), 0.4f);
+            } else {
+                // LAST BAR: accelerating breakbeat/tom fill slamming into the drop.
+                for (int k = 0; k < 16; ++k) {
+                    const float f = float(k) / 15.0f;
+                    if (k % 2 == 0 || r.chance(0.4 + 0.55 * f))
+                        add(Lane::Kick, bb + k * 0.25, 0.24, tom(tomDeg[k & 7]) + (k > 11 ? 5 : 0),
+                            hvel(r, 0.5f + 0.45f * f, 0.04f));
+                    add(Lane::Snare, bb + k * 0.25, 0.18, 38, hvel(r, 0.4f + 0.5f * f, 0.04f));
+                }
+                addRiddimHatBar(bb, r, 1.0f, 2);
+            }
+        }
+        return;
+    }
+
     const int rollStart = std::max(0, bars - 4);
     for (int b = 0; b < bars; ++b) {
         int bar = s.startBar + b;
