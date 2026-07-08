@@ -310,9 +310,17 @@ void Comp::addBass(const Section& s, Rng& r, int skipFirstBar) {
                 int off = 0;
                 if (si != 0 && distinctUsed < distinctCap
                     && r.chance(0.06 + 0.30 * plan.melody01 * plan.complexity01)) {
-                    static const int devs[]  = {12, -12, 10, 6, 3}; // 8va,-8va,b7,b5,b3
-                    static const double dw[]  = {1.7, 0.6, 0.8, 0.5, 0.6};
-                    std::vector<double> dvw(dw, dw + 5);
+                    // Deviation menu for the chug. dissect.py's bassline read of
+                    // the Seleman reference shows the growl moves DOMINANTLY by
+                    // CHROMATIC SEMITONE neighbors around the root (root F : E : F#
+                    // ≈ 104 : 23 : 7) — the signature riddim "root±1" chromatic
+                    // chug — with octave leaps + b7/b5/b3 only as seasoning. So the
+                    // semitone neighbors (esp. the one BELOW the root, the leading
+                    // tone) carry most of the weight. Same single pickWeighted draw,
+                    // so RNG order downstream is unchanged.
+                    static const int devs[]  = {-1, 1, 12, -12, 10, 6, 3}; // root-1(lead),root+1(b2),8va,-8va,b7,b5,b3
+                    static const double dw[]  = {3.0, 1.2, 1.4, 0.4, 0.6, 0.4, 0.5};
+                    std::vector<double> dvw(dw, dw + 7);
                     off = devs[r.pickWeighted(dvw, 1.0)];
                     if (off != lastOff) ++distinctUsed;
                 }
