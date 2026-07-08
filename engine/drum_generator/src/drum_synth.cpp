@@ -104,13 +104,19 @@ StereoBuffer renderKick(const Recipe& rc, const Voice& v) {
     const float gain = rc.get("gain", 0.82f);
 
     // TOM/TIMPANI mode: a Kick note written at a real pitch (>80 Hz, i.e. a
-    // tuned drum, not the low kick root) becomes a resonant tuned tom — it lands
-    // ON the note pitch with only a small pitch drop and a longer ringing body.
-    // This gives the orchestral/bongo percussion for jungle intros without a
-    // separate lane. Low kick notes (rootSub, <80 Hz) are unaffected.
+    // tuned drum, not the low kick root) becomes a tuned tom — it lands ON the
+    // note pitch with only a small pitch drop. This gives the tribal/bongo
+    // percussion for jungle intros without a separate lane. Low kick notes
+    // (rootSub, <80 Hz) are unaffected.
+    // Tom body is TIGHT/DRY, not a long ringing boom: perceptual A/B (tools/
+    // earview/toms.py) showed the reference's tribal toms decay ~14 ms (tom-band
+    // 1/e) — short, staccato, punchy — while our old floor of 0.34 s rang ~82 ms
+    // and smeared/boomed. So the tom body is a short, punchy decay (~a bit longer
+    // than the kick body for pitch, but nowhere near a ring).
     const bool tomMode = (double(v.freqHz) > 80.0);
     const float effDropSemis = tomMode ? std::min(pitchDropSemis, 3.0f) : pitchDropSemis;
-    const float effBodyDecay = tomMode ? std::max(bodyDecay, 0.34f) : bodyDecay;
+    const float effBodyDecay = tomMode ? std::clamp(bodyDecay * 1.3f + 0.012f, 0.035f, 0.07f)
+                                       : bodyDecay;
     const float effClickAmt  = tomMode ? clickAmt * 0.4f : clickAmt;      // less beater click
     const float effClickAmount = tomMode ? clickAmount * 0.4f : clickAmount;
 
