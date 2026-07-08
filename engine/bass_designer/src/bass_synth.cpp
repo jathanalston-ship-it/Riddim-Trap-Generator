@@ -122,8 +122,12 @@ Recipe makeGrowlRecipe(float aggr, float dark, float nov, Rng& rng) {
     // --- PUNCHY STAB amp env: fast attack, SHORT decay to a low tail, short release.
     // Each note is a percussive chug that DIES QUICKLY (not a sustained wub).
     p["ampAtk"]       = clampf(0.002f - aggr * 0.0012f + rng.rangef(-0.0003f, 0.0008f), 0.0006f, 0.004f);
-    p["ampDec"]       = rng.rangef(0.08f, 0.16f);             // longer body so the formant sweep is audible
-    p["ampSus"]       = clampf(0.36f + aggr * 0.06f + rng.rangef(-0.03f, 0.05f), 0.22f, 0.52f); // more sustain -> the moving formant has room to talk, still dies within the note (chug)
+    // SHORT/punchy body with clean gaps (perceptual A/B: our drop was CONGESTED in
+    // the mids vs the reference's clean dark gaps). The within-note formant sweep
+    // comes from the FAST LFO above, so movement no longer needs long sustain —
+    // keep the stab gated so the mids breathe like the reference.
+    p["ampDec"]       = rng.rangef(0.06f, 0.12f);            // punchy, gaps stay open
+    p["ampSus"]       = clampf(0.30f + aggr * 0.06f + rng.rangef(-0.03f, 0.05f), 0.18f, 0.44f); // dies within the note (chug), uncluttered
     p["ampRel"]       = rng.rangef(0.01f, 0.03f);
     p["gain"]         = 0.62f;
     // --- wavefolder: MODERATE, keeps the square tonal (odd-dominant), not a scream ---
