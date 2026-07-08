@@ -486,29 +486,22 @@ void Comp::addSubFollow(const Section& s, int skipFirstBar) {
     const double agg = double(plan.aggression01);
 
     if (s.type == SectionType::Drop) {
-        // BOOMING SUSTAINED sub: re-hit on each BEAT (half-beat at high
-        // aggression) with LONG ringing notes so it's a booming TONE that rings
-        // under the chug — NOT a percussive thump on every 16th (that read as a
-        // "kick on every beat"). The square MID chug carries the fast rhythm;
-        // the sub + kick own the low pulse, and the mix ducks the sub to the
-        // kick so the low end PUMPS. Deterministic (no RNG).
-        const int subDiv = (agg > 0.6) ? 2 : 1;      // per-beat, or per-half-beat when hard
-        const double stepB = 1.0 / double(subDiv);
-        // Leave a real GAP between sub hits so the low end PUMPS (swells then
-        // fades to a gap), like the reference — not a continuous wall. Soft
-        // attack keeps each hit a boom, not a kick thump.
-        const double slen = stepB * 0.58;
-        for (int b = 0; b < s.bars; ++b) {
-            if (b < skipFirstBar) continue;
-            const int hits = int(BPB) * subDiv;      // 4 or 8 per bar
-            for (int k = 0; k < hits; ++k) {
-                const double t = base + b * BPB + k * stepB;
-                const double inBeat = k * stepB - std::floor(k * stepB);
-                const bool onBeat = inBeat < 1e-6;
-                const bool downbeat = (k == 0);
-                const float v = downbeat ? 0.98f : (onBeat ? 0.9f : 0.8f);
-                add(Lane::Sub, t, slen, rootSub, v, 0.12f);
-            }
+        // SUB = the deep octave of the TONAL BASS. It plays the growl's (BassA)
+        // EXACT notes — same rhythm, same pitch movement — one octave down, NOT a
+        // kick-locked pulse. This is how riddim low end is actually built: the
+        // same MIDI line drives the tonal bass and the sub. (addBass runs before
+        // this, so BassA is already populated.) Deterministic.
+        const auto& growl = score.notes(Lane::BassA);
+        const double lo = (s.startBar + skipFirstBar) * BPB;
+        const double hi = (s.startBar + s.bars) * BPB;
+        for (const Note& n : growl) {
+            if (n.startBeat < lo - 1e-6 || n.startBeat >= hi - 1e-6) continue;
+            int subMidi = n.midi - 12;                    // one octave below the growl
+            while (subMidi > rootSub + 5) subMidi -= 12;  // fold to stay in the deep octave
+            // Follow the chug rhythm; the sub synth's soft attack + decay/release
+            // shapes each hit into a boom. Slightly longer than the stab, clamped.
+            const double len = std::clamp(n.lengthBeats * 1.25, 0.14, 0.55);
+            add(Lane::Sub, n.startBeat, len, subMidi, n.velocity, 0.12f);
         }
         return;
     }

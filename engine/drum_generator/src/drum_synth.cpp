@@ -46,20 +46,21 @@ Recipe makeKickRecipe(float aggr, float dark, float nov, Rng& rng) {
     p["startHz"]   = rng.rangef(body * 2.1f, body * 2.9f);          // glide start (legacy)
     p["endHz"]     = rng.rangef(body * 0.86f, body * 1.14f);        // root: settles ~body
     p["pitchMs"]   = rng.rangef(0.020f, 0.045f);                    // legacy glide tau
-    // Fast downward PITCH ENVELOPE (semitone drop -> root) — the tearout
-    // "thump/laser" transient. Bigger + faster when aggressive.
-    p["pitchDropSemis"] = rng.rangef(12.0f, 18.0f) + aggr * 5.0f;   // ~12-23 st
-    p["pitchDropMs"]    = rng.rangef(0.018f, 0.040f);              // exp time-const
-    // Decay from the profile, biased short; trap a touch boomier.
-    p["bodyDecay"] = rng.rangef(decay * 0.78f, decay * 1.22f) + (1.0f - aggr) * 0.035f;
-    // "Punch": low harmonics (3f-5f, ~140-260 Hz) on a medium env give clean
-    // low-mid body that pulls the sound out of pure-sub territory (no fizz).
-    p["punchAmt"]  = rng.rangef(0.85f, 1.2f) + aggr * 0.2f;
-    p["punchMs"]   = rng.rangef(0.07f, 0.12f);
-    // Mid "knock" tone (chest thump) — a sustained low-mid layer.
-    p["knockHz"]   = rng.rangef(155.0f, 235.0f);
-    p["knockAmt"]  = rng.rangef(0.85f, 1.2f);
-    p["knockMs"]   = rng.rangef(0.08f, 0.14f);
+    // SHARP EDM kick: a SMALL, fast pitch drop for a tight punch (a big drop
+    // rings/booms like a gong — the sub bass now owns the deep low, so the kick
+    // is a crisp transient, not a resonating tail).
+    p["pitchDropSemis"] = rng.rangef(5.0f, 9.0f) + aggr * 3.0f;     // ~5-12 st (was 12-23)
+    p["pitchDropMs"]    = rng.rangef(0.012f, 0.025f);              // faster -> snappier
+    // Tight/short body decay so the kick doesn't ring under the chug.
+    p["bodyDecay"] = rng.rangef(decay * 0.42f, decay * 0.68f) + (1.0f - aggr) * 0.015f;
+    // "Punch": low harmonics (3f-5f) on a SHORT env — click-forward body, no
+    // long low-mid resonance.
+    p["punchAmt"]  = rng.rangef(0.7f, 1.0f) + aggr * 0.2f;
+    p["punchMs"]   = rng.rangef(0.04f, 0.07f);
+    // Mid "knock" (chest thump) — kept SHORT so it snaps instead of sustaining.
+    p["knockHz"]   = rng.rangef(160.0f, 240.0f);
+    p["knockAmt"]  = rng.rangef(0.5f, 0.8f);
+    p["knockMs"]   = rng.rangef(0.04f, 0.075f);
     // Beater click/knock: band-limited 2-6 kHz noise burst. The references have
     // an audible click (2-8 kHz share ~4-7%); this restores it. Level is
     // calibrated (kClickCal) so the rendered kick's 2-8 kHz energy share lands
