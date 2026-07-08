@@ -682,7 +682,10 @@ void Comp::addRiddimHatBar(double bb, Rng& r, float energy, int archetype) {
         case 3: densMul = 0.7f;  gapBias = 0.18f;  break;
         default: break;
     }
-    const float perBeat = target * densMul * (0.30f + 0.82f * e);
+    // Energy scaling trimmed so DROPS aren't over-hatted (A/B: our drop ran ~2.6
+    // hats/beat vs the reference's ~1.9 — too busy). Lower slope keeps intros
+    // sparse and pulls the full-energy drop density down.
+    const float perBeat = target * densMul * (0.28f + 0.70f * e);
     const float pbase = std::max(0.0f, std::min(0.98f, perBeat / 4.0f));
 
     for (int beat = 0; beat < 4; ++beat) {
@@ -690,8 +693,10 @@ void Comp::addRiddimHatBar(double bb, Rng& r, float energy, int archetype) {
         if (r.chance((0.10f + gapBias) * (1.2f - e))) continue;
         // half-gap archetype: leave beats 1 & 3 sparse for a skeletal pocket.
         if (archetype == 3 && (beat == 0 || beat == 2) && r.chance(0.5)) continue;
-        // Occasional 16th roll fill on this beat (busier as energy rises).
-        const bool roll = r.chance(0.10 + rollBias + 0.18 * e);
+        // Occasional 16th roll fill on this beat. Rolls were the main source of
+        // over-hatting in drops (a roll fills a whole beat with 16ths), so keep
+        // them RARE — an occasional accent, not a constant flurry.
+        const bool roll = r.chance(0.04 + rollBias * 0.6f + 0.08 * e);
         for (int sub = 0; sub < 4; ++sub) {
             const int slot = beat * 4 + sub;             // 0..15
             const double t = mt(r, bb + beat + 0.25 * sub);
