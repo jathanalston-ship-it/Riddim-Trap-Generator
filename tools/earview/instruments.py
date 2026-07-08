@@ -422,28 +422,58 @@ def analyze(path, bpm=None, drop_secs=40.0):
                    drums=drums, tonal=tonal)
     return profile, comps
 
+def clampf(v, lo, hi): return float(max(lo, min(hi, v)))
+
+def write_drum_profile(path, profile):
+    # Emit a JSON whose keys match rtg::DrumProfile::loadFromFile so the engine
+    # can steer its kick/snare/hat synthesis toward the DETECTED drums with no
+    # new parsing. Only fields whose measurement semantics genuinely match are
+    # written (others fall back to the engine's builtin reference); values are
+    # clamped to the profiler's documented sane ranges so a noisy detection can
+    # never push the synth somewhere ugly.
+    d = profile['drums']; out = {}
+    if 'kick' in d:
+        k = d['kick']
+        if k.get('pitch_hz', 0) > 0: out['kickBodyHz'] = round(clampf(k['pitch_hz'], 40, 70), 2)
+        out['kickDecayMs'] = round(clampf(k['decay_ms'], 45, 180), 1)
+    if 'snare' in d:
+        out['snareCrackDecayMs'] = round(clampf(d['snare']['decay_ms'], 56, 193), 1)
+    if 'hat' in d:
+        h = d['hat']
+        out['hatCentroidHz'] = round(clampf(h['centroid_hz'], 4000, 16000), 1)
+        out['hatDecayMs']    = round(clampf(h['decay_ms'], 37, 120), 1)
+        out['hatDensityPerBeat'] = round(clampf(h['density']*4.0, 1.6, 3.6), 2)
+    out['refCount'] = 1
+    with open(path, 'w') as fh:
+        fh.write('{\n' + ',\n'.join(f'  "{k}": {v}' for k, v in out.items()) + '\n}\n')
+    return out
+
 def main():
     global QUIET
     args = sys.argv[1:]
     if not args:
-        print("usage: instruments.py <wav> [--bpm N] [--json out] [--png out] [--quiet]"); return
-    wav=args[0]; bpm=None; jout=None; pout=None; QUIET=False
+        print("usage: instruments.py <wav> [--bpm N] [--json out] [--png out] "
+              "[--drum-profile-out out] [--quiet]"); return
+    wav=args[0]; bpm=None; jout=None; pout=None; dpout=None; QUIET=False
     i=1
     while i < len(args):
         if args[i]=='--bpm': bpm=float(args[i+1]); i+=2
         elif args[i]=='--json': jout=args[i+1]; i+=2
         elif args[i]=='--png': pout=args[i+1]; i+=2
+        elif args[i]=='--drum-profile-out': dpout=args[i+1]; i+=2
         elif args[i]=='--quiet': QUIET=True; i+=1
         else: i+=1
     profile, comps = analyze(wav, bpm)
     log(plain_language(profile))
     if jout:
-        # strip numpy arrays before dumping
         json.dump(profile, open(jout,'w'), indent=1)
         log(f"# wrote {jout}")
     if pout:
         write_png(pout, comps, profile['drums'], profile); log(f"# wrote {pout}")
-    if not jout and not pout:
+    if dpout:
+        emitted = write_drum_profile(dpout, profile)
+        log(f"# wrote {dpout} (engine DrumProfile): {emitted}")
+    if not jout and not pout and not dpout:
         print(json.dumps(profile, indent=1))
 
 QUIET=False

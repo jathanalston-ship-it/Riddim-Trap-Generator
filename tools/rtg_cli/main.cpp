@@ -5,6 +5,7 @@
 //           [--complexity 50] [--melody 30] [--chaos 25] [--drops 2]
 //           [--intro atmospheric|minimal|vocalchop|impact|fakeout]
 //           [--library <dir>] [--calibration <calibration.json>]
+//           [--drum-profile <drum_profile.json>]
 //
 // Background library-evolution mode (no audio output):
 //   rtg_cli --evolve <N> --library <dir>
@@ -27,6 +28,7 @@
 #include <string>
 #include <vector>
 #include "rtg/decision/calibration.h"
+#include "rtg/drums/drum_profile.h"       // DrumProfile::setActive (reference drums)
 #include "rtg/library/ab_log.h"
 #include "rtg/generation/pipeline.h"
 #include "rtg/library/evolution.h"
@@ -160,7 +162,7 @@ int main(int argc, char** argv) {
     Params params;
     std::string out = "rtg_track.wav";
     std::string libDir = "rtg_library";
-    std::string analyzeRefs, calibOut, calibrationIn, stemsDir, scoreOut;
+    std::string analyzeRefs, calibOut, calibrationIn, stemsDir, scoreOut, drumProfileIn;
     bool genreGiven = false;
     bool libGiven = false;
     int evolveCycles = 0;
@@ -177,6 +179,7 @@ int main(int argc, char** argv) {
         else if (a == "--analyze-refs") analyzeRefs = arg(i);
         else if (a == "--calib-out") calibOut = arg(i);
         else if (a == "--calibration") calibrationIn = arg(i);
+        else if (a == "--drum-profile") drumProfileIn = arg(i);
         else if (a == "--evolve") evolveCycles = std::atoi(arg(i).c_str());
         else if (a == "--ab-summary") abSummary = arg(i);
         else if (a == "--ab-last") abLast = std::atoi(arg(i).c_str());
@@ -246,6 +249,20 @@ int main(int argc, char** argv) {
     if (Calibration::active()) {
         const CalibrationProfile& p = Calibration::active()->forGenre(params.genre);
         std::printf("[rtg] calibration active: target LUFS=%.1f (%d refs)\n", p.targetLufs, p.refCount);
+    }
+    // Reference drum steering: a DrumProfile extracted from a reference (e.g. by
+    // tools/earview/instruments.py --drum-profile-out) makes the kick/snare/hat
+    // synthesis target the DETECTED drums instead of the baked-in reference.
+    if (!drumProfileIn.empty()) {
+        DrumProfile dp;
+        if (dp.loadFromFile(drumProfileIn)) {
+            DrumProfile::setActive(dp);
+            std::printf("[rtg] drum profile: loaded %s (kick %.0fHz/%.0fms, hat %.0fHz/%.0fms)\n",
+                        drumProfileIn.c_str(), dp.kickBodyHz, dp.kickDecayMs,
+                        dp.hatCentroidHz, dp.hatDecayMs);
+        } else {
+            std::printf("[rtg] WARNING: could not load drum profile %s\n", drumProfileIn.c_str());
+        }
     }
     std::printf("[rtg] library: %d sounds in %s\n", (int)library.all().size(), libDir.c_str());
     std::printf("[rtg] generating: %s %.0f BPM, %.0fs, seed %llu\n",
