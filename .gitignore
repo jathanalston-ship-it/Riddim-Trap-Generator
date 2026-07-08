@@ -12,3 +12,7 @@ calibration.json
 # Python bytecode from the earview/analysis dev tools
 __pycache__/
 *.pyc
+
+# Generated audio (Rule 7: never commit generated audio). rtg_cli's default
+# output is rtg_track.wav in the CWD; smoke renders land as *.wav too.
+*.wav
