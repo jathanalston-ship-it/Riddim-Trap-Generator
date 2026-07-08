@@ -1033,48 +1033,76 @@ void Comp::composeIntro(const Section& s, int idx, Rng& r) {
             const int span = std::max(1, bars - tomStart);
             const float prog = span > 1 ? float(b - tomStart) / float(span - 1) : 1.0f;
 
-            if (!last) {
+            // Dynamic energy ARC for LONG intros (bars >= 20): a loud tribal-tom
+            // OPEN -> a quiet atmospheric VALLEY -> a rebuild of intensity into the
+            // drop. For short intros (bars < 20) arc == 1 exactly, so vs == 1 and
+            // the tom loop is un-gated => the pattern below is BYTE-IDENTICAL to
+            // the legacy behavior and default renders are unchanged.
+            float arc;
+            if (bars < 20)          arc = 1.0f;                                     // legacy: unchanged
+            else if (prog < 0.15f)  arc = 1.0f - 1.2f * prog;                       // open ~1.0 -> 0.8
+            else if (prog < 0.60f)  arc = 0.22f;                                    // atmospheric valley
+            else                    arc = 0.30f + (prog - 0.60f) / 0.40f * 0.70f;   // rebuild 0.30 -> 1.0
+            const float vs = 0.5f + 0.5f * arc;   // velocity/probability scaler (== 1.0 when arc == 1)
+            const bool valley = (arc < 0.3f);     // only reachable when bars >= 20
+
+            if (!last && valley) {
+                // ATMOSPHERIC VALLEY: skip the busy toms & horn pops entirely; keep
+                // only a quiet bed — a soft downbeat kick, a sparse dark stab, an
+                // occasional perc — and let the sustained Pad + Riser carry it.
+                add(Lane::Kick, bb + 0.0, 0.5, rootSub, hvel(r, 0.4f * arc, 0.03f));
+                for (int e = 0; e < 8; ++e) {
+                    if (!r.chance((0.30 + 0.15f * prog) * 0.4f)) continue;
+                    add(Lane::Melody, mt(r, bb + e * 0.5), r.chance(0.5) ? 0.25 : 0.45,
+                        scalePitch(rootMid + 24, stabDeg[e & 7]), hvel(r, 0.5f * arc, 0.05f),
+                        0.15f + 0.4f * float(r.uniform()));
+                }
+                if (r.chance(0.35))
+                    add(Lane::Perc, mt(r, bb + 2.5), 0.12, 37, hvel(r, 0.25f * arc, 0.04f), 0.4f);
+            } else if (!last) {
                 // Deep timpani + kick weight on the downbeat.
-                add(Lane::Kick, bb + 0.0, 0.6, tom(0) - 12, hvel(r, 0.95f, 0.04f));
-                add(Lane::Kick, bb + 0.0, 0.28, rootSub, hvel(r, 0.82f, 0.05f));
-                if (r.chance(0.6 + 0.3f * prog))
-                    add(Lane::Kick, bb + 2.0, 0.5, tom(2) - 12, hvel(r, 0.78f, 0.05f));
+                add(Lane::Kick, bb + 0.0, 0.6, tom(0) - 12, hvel(r, 0.95f * vs, 0.04f));
+                add(Lane::Kick, bb + 0.0, 0.28, rootSub, hvel(r, 0.82f * vs, 0.05f));
+                if (r.chance((0.6 + 0.3f * prog) * vs))
+                    add(Lane::Kick, bb + 2.0, 0.5, tom(2) - 12, hvel(r, 0.78f * vs, 0.05f));
 
                 // FAST tuned TOMS from the very first bar (busy off the rip = instant
                 // tension, per the reference), a touch busier still as it builds.
+                // Gated OUT of the sparse rebuild bars (arc <= 0.35).
+                if (arc > 0.35f)
                 for (int e = 0; e < 8; ++e) {
                     const bool onBeat = (e % 2) == 0;
-                    if (!onBeat && !r.chance(0.6 + 0.3f * prog)) continue;
+                    if (!onBeat && !r.chance((0.6 + 0.3f * prog) * vs)) continue;
                     add(Lane::Kick, mt(r, bb + e * 0.5), 0.42, tom(tomDeg[e & 7]),
-                        hvel(r, (onBeat ? 0.85f : 0.6f) * (0.82f + 0.18f * prog), 0.05f));
-                    if (r.chance(0.25 + 0.4f * prog))   // 16th roll fills
+                        hvel(r, (onBeat ? 0.85f : 0.6f) * (0.82f + 0.18f * prog) * vs, 0.05f));
+                    if (r.chance((0.25 + 0.4f * prog) * vs))   // 16th roll fills
                         add(Lane::Kick, bb + e * 0.5 + 0.25, 0.3,
-                            tom(tomDeg[(e + 1) & 7]), hvel(r, 0.5f, 0.05f));
+                            tom(tomDeg[(e + 1) & 7]), hvel(r, 0.5f * vs, 0.05f));
                 }
 
                 // Busy hats + shaker (fast-paced intro).
-                addRiddimHatBar(bb, r, 0.6f + 0.35f * prog, 2);
+                addRiddimHatBar(bb, r, (0.6f + 0.35f * prog) * vs, 2);
                 for (int sub = 1; sub < 16; sub += 2)
-                    if (r.chance(0.4 + 0.3f * prog))
-                        add(Lane::Perc, mt(r, bb + sub * 0.25), 0.11, 37, hvel(r, 0.28f, 0.05f), 0.4f);
+                    if (r.chance((0.4 + 0.3f * prog) * vs))
+                        add(Lane::Perc, mt(r, bb + sub * 0.25), 0.11, 37, hvel(r, 0.28f * vs, 0.05f), 0.4f);
 
                 // DARK cyberpunk synth STAB (minor tones, mid-high register) — the
                 // intro's creepy melodic hook, present from the first tom bar. Mod
                 // varies per hit for filter/timbre movement.
                 for (int e = 0; e < 8; ++e) {
-                    if (!r.chance(0.30 + 0.15f * prog)) continue;
+                    if (!r.chance((0.30 + 0.15f * prog) * vs)) continue;
                     add(Lane::Melody, mt(r, bb + e * 0.5), r.chance(0.5) ? 0.25 : 0.45,
-                        scalePitch(rootMid + 24, stabDeg[e & 7]), hvel(r, 0.5f, 0.06f),
+                        scalePitch(rootMid + 24, stabDeg[e & 7]), hvel(r, 0.5f * vs, 0.06f),
                         0.15f + 0.4f * float(r.uniform()));
                 }
 
                 // Horn pops accent in the back half.
                 if (prog > 0.4f) {
                     for (int e = 0; e < 8; ++e) {
-                        if (!r.chance(0.2 + 0.4f * prog)) continue;
+                        if (!r.chance((0.2 + 0.4f * prog) * vs)) continue;
                         add(Lane::BassB, mt(r, bb + e * 0.5), 0.18,
                             scalePitch(rootMid, popDeg[e & 7]),
-                            hvel(r, 0.55f + 0.3f * prog, 0.06f),
+                            hvel(r, (0.55f + 0.3f * prog) * vs, 0.06f),
                             std::min(1.0f, 0.62f + 0.4f * prog));
                     }
                 }
@@ -1212,29 +1240,19 @@ void Comp::composeBuild(const Section& s, int idx, Rng& r) {
     // accelerating breakbeat/tom fill that slams into the drop (composeDrop cuts a
     // short pre-drop gap for the fakeout). No mechanical snare-roll doubling.
     if (riddim) {
+        // TWO-PHASE build (modeled on Seleman): phase 1 is SNARE-driven with a
+        // steady backbone (~2.6 onsets/beat) and a snare-roll fill at its end;
+        // phase 2 drops the snares out and the HATS take over and ACCELERATE
+        // while the whole-build riser (added at the top of this function) rises
+        // underneath. Tension comes from the voice SWITCH + hat acceleration +
+        // rising riser, NOT from piling every voice onto every bar.
         static const int tomDeg[] = {0, 4, 2, 4, 0, 5, 4, 2};
         auto tom = [&](int d) { return scalePitch(rootMid + 12, d); };
+        const int ph1 = std::max(1, bars / 2);   // phase 1 = bars [0, ph1)
         for (int b = 0; b < bars; ++b) {
             const double bb = (s.startBar + b) * BPB;
             const bool last = (b == bars - 1);
-            const float prog = bars > 1 ? float(b) / float(bars - 1) : 1.0f;
-            if (!last) {
-                add(Lane::Kick, bb + 0.0, 0.3, rootSub, hvel(r, 0.9f, 0.05f));
-                add(Lane::Snare, bb + 1.0, 0.22, 38, hvel(r, 0.9f, 0.05f));
-                add(Lane::Snare, bb + 3.0, 0.22, 38, hvel(r, 0.9f, 0.05f));
-                addRiddimHatBar(bb, r, 0.55f + 0.4f * prog, 2);
-                for (int e = 0; e < 8; ++e) {
-                    if (r.chance(0.28 + 0.5f * prog))     // driving toms, busier as it builds
-                        add(Lane::Kick, mt(r, bb + e * 0.5), 0.32, tom(tomDeg[e & 7]),
-                            hvel(r, (0.45f + 0.35f * prog) * ((e % 2) ? 0.8f : 1.0f), 0.05f));
-                    if ((e % 2) == 1 && r.chance(0.18 + 0.5f * prog))
-                        add(Lane::Snare, mt(r, bb + e * 0.5), 0.1, 38,
-                            hvel(r, 0.28f + 0.3f * prog, 0.06f));  // jungle ghost snares
-                }
-                for (int sub = 1; sub < 16; sub += 2)
-                    if (r.chance(0.35 + 0.3f * prog))
-                        add(Lane::Perc, mt(r, bb + sub * 0.25), 0.1, 37, hvel(r, 0.28f, 0.05f), 0.4f);
-            } else {
+            if (last) {
                 // LAST BAR: accelerating breakbeat/tom fill slamming into the drop.
                 for (int k = 0; k < 16; ++k) {
                     const float f = float(k) / 15.0f;
@@ -1244,6 +1262,48 @@ void Comp::composeBuild(const Section& s, int idx, Rng& r) {
                     add(Lane::Snare, bb + k * 0.25, 0.18, 38, hvel(r, 0.4f + 0.5f * f, 0.04f));
                 }
                 addRiddimHatBar(bb, r, 1.0f, 2);
+            } else if (b < ph1) {
+                // PHASE 1 — snare-driven backbone (kick 1, snares 2 & 4).
+                const float prog1 = ph1 > 1 ? float(b) / float(ph1 - 1) : 1.0f;
+                add(Lane::Kick, bb + 0.0, 0.3, rootSub, hvel(r, 0.9f, 0.05f));
+                add(Lane::Snare, bb + 1.0, 0.22, 38, hvel(r, 0.9f, 0.05f));
+                add(Lane::Snare, bb + 3.0, 0.22, 38, hvel(r, 0.9f, 0.05f));
+                // A few extra snares on the offbeat 8th grid (moderate rhythm).
+                for (int e = 1; e < 8; e += 2)
+                    if (r.chance(0.4))
+                        add(Lane::Snare, mt(r, bb + e * 0.5), 0.14, 38,
+                            hvel(r, 0.5f + 0.2f * prog1, 0.06f));
+                // Light hats, and toms only occasionally — keep the pocket sparse.
+                addRiddimHatBar(bb, r, 0.4f + 0.2f * prog1, 2);
+                for (int e = 0; e < 8; ++e)
+                    if (r.chance(0.15))
+                        add(Lane::Kick, mt(r, bb + e * 0.5), 0.3, tom(tomDeg[e & 7]),
+                            hvel(r, 0.5f, 0.05f));
+                // Last bar of phase 1: a rising snare-roll FILL.
+                if (b == ph1 - 1)
+                    for (int k = 0; k < 8; ++k)
+                        add(Lane::Snare, bb + k * 0.5, 0.16, 38,
+                            hvel(r, 0.5f + 0.4f * (float(k) / 7.0f), 0.04f));
+            } else {
+                // PHASE 2 — snares drop out; hats drive and ACCELERATE.
+                const int span2 = std::max(1, bars - ph1);
+                const float prog2 = span2 > 1 ? float(b - ph1) / float(span2 - 1) : 1.0f;
+                add(Lane::Kick, bb + 0.0, 0.3, rootSub, hvel(r, 0.9f, 0.05f));
+                if (r.chance(0.1))   // only a rare ghost snare survives
+                    add(Lane::Snare, mt(r, bb + 2.0), 0.1, 38, hvel(r, 0.3f, 0.05f));
+                addRiddimHatBar(bb, r, 0.55f + 0.4f * prog2, 3);
+                // Extra 16th hats whose probability climbs with prog2 (acceleration).
+                for (int k = 0; k < 16; ++k)
+                    if (r.chance(0.3 + 0.5f * prog2))
+                        add(Lane::HatClosed, mt(r, bb + k * 0.25), 0.2, 42,
+                            hvel(r, 0.4f + 0.2f * prog2, 0.06f), 0.45f);
+                // Toms rare, perc sparse.
+                for (int e = 0; e < 8; ++e)
+                    if (r.chance(0.08))
+                        add(Lane::Kick, mt(r, bb + e * 0.5), 0.28, tom(tomDeg[e & 7]),
+                            hvel(r, 0.45f, 0.05f));
+                if (r.chance(0.3))
+                    add(Lane::Perc, mt(r, bb + 2.5), 0.1, 37, hvel(r, 0.28f, 0.05f), 0.4f);
             }
         }
         return;
