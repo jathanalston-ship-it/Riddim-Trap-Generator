@@ -434,6 +434,7 @@ CalibrationProfile meanProfile(const CalibrationProfile& a, const CalibrationPro
     o.growlCentroidHz = avg(a.growlCentroidHz, b.growlCentroidHz);
     o.hiShare = avg(a.hiShare, b.hiShare);
     o.roughness = avg(a.roughness, b.roughness);
+    o.sharpness = avg(a.sharpness, b.sharpness);
     o.refCount = a.refCount + b.refCount;
     return o;
 }
@@ -497,6 +498,49 @@ float measureRoughnessRef(const StereoBuffer& b, double fs) {
 
 } // namespace
 
+// ---- Zwicker sharpness (acum) via a 24-band Bark bandpass filterbank -------
+// RBJ bandpass (constant 0 dB peak gain), Q = fc / critical-bandwidth. Specific
+// loudness N'(z) ≈ band-energy^0.23; sharpness = 0.11 · Σ z·g(z)·N'(z) / Σ N'(z)
+// with g(z)=1 up to 16 Bark, rising above (the standard high-band emphasis).
+float measureSharpnessAcum(const StereoBuffer& b, double fs) {
+    if (b.empty()) return 0.0f;
+    auto [s0, s1] = loudestWindow(b, fs);
+    // 24 critical-band centers and bandwidths (Hz).
+    static const double fc[24] = { 50,150,250,350,450,570,700,840,1000,1170,1370,
+        1600,1850,2150,2500,2900,3400,4000,4800,5800,7000,8500,10500,13500 };
+    static const double bw[24] = { 100,100,100,100,110,120,140,150,160,190,210,
+        240,280,320,380,450,550,700,900,1100,1300,1800,2500,3500 };
+    struct BP { // RBJ bandpass, constant 0 dB peak gain
+        double b0,b1,b2,a1,a2,z1=0,z2=0;
+        BP(double fs_,double f0,double Q){ double w=2*M_PI*f0/fs_,c=std::cos(w),s=std::sin(w),al=s/(2*Q);
+            double a0=1+al; b0=al/a0; b1=0; b2=-al/a0; a1=(-2*c)/a0; a2=(1-al)/a0; }
+        inline float p(float x){ double y=b0*x+z1; z1=b1*x-a1*y+z2; z2=b2*x-a2*y; return float(y); }
+    };
+    const int nyq = 24;
+    std::vector<BP> fl, fr; std::vector<double> E(nyq, 0.0);
+    int used = 0;
+    for (int k = 0; k < nyq; ++k) {
+        if (fc[k] >= 0.45 * fs) break;                     // skip bands near Nyquist
+        double Q = std::max(0.7, fc[k] / bw[k]);
+        fl.emplace_back(fs, fc[k], Q); fr.emplace_back(fs, fc[k], Q); ++used;
+    }
+    for (size_t i = s0; i < s1; ++i)
+        for (int k = 0; k < used; ++k) {
+            float y = fl[k].p(b.l[i]) + fr[k].p(b.r[i]);
+            E[k] += double(y) * y;
+        }
+    // Zwicker sum. z ≈ band index+1 (Bark); g(z) rises above 16 Bark.
+    double num = 0.0, den = 0.0;
+    for (int k = 0; k < used; ++k) {
+        double z = k + 1;                                  // Bark position
+        double Np = std::pow(E[k] + 1e-20, 0.23);          // specific loudness
+        double g = (z <= 16.0) ? 1.0 : 0.066 * std::exp(0.171 * z);
+        num += z * g * Np; den += Np;
+    }
+    if (den <= 1e-12) return 0.0f;
+    return float(0.11 * num / den);
+}
+
 RefMeasurement Calibration::measureReference(const StereoBuffer& audio48k, double sampleRate) {
     RefMeasurement m;
     m.lufs = measureLufs(audio48k, sampleRate);
@@ -507,6 +551,7 @@ RefMeasurement Calibration::measureReference(const StereoBuffer& audio48k, doubl
     m.width = measureStereoWidth(audio48k);
     m.hiShare = measureHiShareRef(audio48k, sampleRate);
     m.roughness = measureRoughnessRef(audio48k, sampleRate);
+    m.sharpness = measureSharpnessAcum(audio48k, sampleRate);
     GrowlFingerprint gf = measureGrowlFingerprint(audio48k, sampleRate);
     m.growlOdd = gf.odd;
     m.growlWobbleHz = gf.wobbleHz;
@@ -518,7 +563,7 @@ CalibrationProfile Calibration::aggregate(const std::vector<RefMeasurement>& mea
     CalibrationProfile prof;
     if (measurements.empty()) { prof.present = false; return prof; }
 
-    std::vector<float> vLufs, vCrest, vContrast, vTilt, vWidth, vGOdd, vGWob, vGCen, vHi, vRough;
+    std::vector<float> vLufs, vCrest, vContrast, vTilt, vWidth, vGOdd, vGWob, vGCen, vHi, vRough, vSharp;
     std::array<std::vector<float>, kCalBands> vBands;
     for (const auto& r : measurements) {
         vLufs.push_back(r.lufs);
@@ -531,6 +576,7 @@ CalibrationProfile Calibration::aggregate(const std::vector<RefMeasurement>& mea
         vGCen.push_back(r.growlCentroidHz);
         vHi.push_back(r.hiShare);
         vRough.push_back(r.roughness);
+        vSharp.push_back(r.sharpness);
         for (int b = 0; b < kCalBands; ++b) vBands[b].push_back(r.bands[b]);
     }
 
@@ -546,6 +592,7 @@ CalibrationProfile Calibration::aggregate(const std::vector<RefMeasurement>& mea
     prof.growlCentroidHz = medianOf(vGCen);
     prof.hiShare = medianOf(vHi);
     prof.roughness = medianOf(vRough);
+    prof.sharpness = medianOf(vSharp);
     float s = 0.0f;
     for (int b = 0; b < kCalBands; ++b) { prof.bands[b] = medianOf(vBands[b]); s += prof.bands[b]; }
     if (s > 1e-6f) for (int b = 0; b < kCalBands; ++b) prof.bands[b] /= s;   // re-normalize
@@ -589,6 +636,7 @@ void writeProfile(std::ostream& os, const char* prefix, const CalibrationProfile
     kv("growlCentroidHz", p.growlCentroidHz);
     kv("hiShare", p.hiShare);
     kv("roughness", p.roughness);
+    kv("sharpness", p.sharpness);
     kv("refCount", p.refCount);
 }
 
@@ -640,6 +688,7 @@ void readProfile(const std::map<std::string, double>& m, const char* prefix, Cal
     p.growlCentroidHz = get("growlCentroidHz", p.growlCentroidHz);
     p.hiShare = get("hiShare", p.hiShare);
     p.roughness = get("roughness", p.roughness);
+    p.sharpness = get("sharpness", p.sharpness);
     p.refCount = int(std::lround(get("refCount", float(p.refCount))));
 }
 

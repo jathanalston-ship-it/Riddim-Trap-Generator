@@ -331,16 +331,25 @@ StereoBuffer masterize(const StereoBuffer& premaster, const Plan& plan,
         // (hi-share proxy for sharpness) and SCALE the air/presence boost toward
         // a target so an already-bright/harsh source isn't over-brightened (the
         // fixed +5 dB air pushed some masters ~20% too sharp vs the references).
-        const float hiShare = measureHiShare(base, sampleRate);
-        // Target hi/mid balance (>3.5k vs >500Hz), on a perceptually-tuned default
-        // (darker palettes aim lower). NOTE: this HP-ratio is a good runtime
-        // CONTROL but a poor cross-track perceptual target (its gentle rolloff
-        // leaks mids, so different tracks hit the same ratio at different real
-        // brightness) — so brightness is NOT slaved to a loaded reference here;
-        // crest + roughness are (they correlate cleanly). A proper Bark/Zwicker
-        // sharpness measure would let brightness track a reference too.
-        const float target = 0.40f - float(plan.darkness01) * 0.12f;
-        const float err = (target - hiShare) / target;         // +ve = too dark, -ve = too bright
+        // When a reference is CALIBRATED, drive brightness toward its measured
+        // Zwicker SHARPNESS (acum) — a Bark-weighted specific-loudness centroid
+        // that (unlike the hi-share HP-ratio) does NOT leak mids, so it is a true
+        // cross-track perceptual target. This finally lets brightness track a
+        // reference like crest + roughness already do. With NO reference we keep
+        // the tuned hi-share default (the HP-ratio is a fine relative control),
+        // so the default render path is byte-for-byte unchanged.
+        float err;   // +ve = too dark (boost), -ve = too bright (cut)
+        const auto& calB = Calibration::active();
+        const CalibrationProfile* profB =
+            calB ? &calB->forGenre(plan.params.genre) : nullptr;
+        if (profB && profB->present && profB->sharpness > 0.01f) {
+            const float curSharp = measureSharpnessAcum(base, sampleRate);
+            err = (profB->sharpness - curSharp) / std::max(0.2f, profB->sharpness);
+        } else {
+            const float hiShare = measureHiShare(base, sampleRate);
+            const float target  = 0.40f - float(plan.darkness01) * 0.12f;
+            err = (target - hiShare) / target;
+        }
         const double airDb  = std::clamp(err * 8.0f, -4.0f, 5.0f);
         const double presDb = std::clamp(err * 5.0f, -3.0f, 3.0f);
         Biquad prL = highShelf(sampleRate, 3500.0, presDb), prR = prL;

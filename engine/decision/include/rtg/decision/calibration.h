@@ -43,6 +43,7 @@ struct CalibrationProfile {
     // when a reference is loaded. 0 => unmeasured, use engine defaults.
     float hiShare   = 0.0f;   // perceived brightness: RMS>3.5k / RMS>500Hz (Zwicker-sharpness proxy)
     float roughness = 0.0f;   // perceived gnarl: 15-150Hz amplitude-modulation / carrier
+    float sharpness = 0.0f;   // Zwicker sharpness (acum): Bark-weighted specific loudness; 0 = unmeasured
     int   refCount = 0;                    // number of reference files aggregated
 };
 
@@ -61,6 +62,7 @@ struct RefMeasurement {
     float growlCentroidHz = 2200.0f; // growl-band (120-8kHz) spectral centroid, Hz (brightness)
     float hiShare   = 0.0f;   // perceived brightness (RMS>3.5k / RMS>500Hz)
     float roughness = 0.0f;   // perceived gnarl (15-150Hz AM / carrier)
+    float sharpness = 0.0f;   // Zwicker sharpness (acum)
 };
 
 // Selector for assignProfile / the analyzer: which slot a freshly aggregated
@@ -130,6 +132,15 @@ float measureSpectralTiltDbPerOct(const StereoBuffer& audio, double sampleRate);
 
 // Side/mid RMS ratio (0 = mono, larger = wider).
 float measureStereoWidth(const StereoBuffer& audio);
+
+// Zwicker perceived SHARPNESS (acum) over the loudest ~4 s (the drop). A
+// 24-band critical-band (Bark) bandpass filterbank measures specific loudness
+// per band (energy^0.23), then the Zwicker g(z) weighting (unity to ~16 Bark,
+// rising above) forms a Bark-weighted centroid. Unlike the high-pass "hi-share"
+// proxy this does NOT leak mids, so it is a true cross-track brightness target:
+// a perceptually dark master reads low here even if its gentle HP ratio is high.
+// Hand-rolled biquads; no FFT, no JUCE. Empty/degenerate input returns 0.
+float measureSharpnessAcum(const StereoBuffer& audio, double sampleRate);
 
 // Growl-bass character fingerprint (analysis-only). Measured over the single
 // loudest ~4 s window: odd-harmonic fraction of the fundamental (square-ness),
