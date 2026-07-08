@@ -287,6 +287,26 @@ struct Allpass {
     }
 };
 
+// Perceived ROUGHNESS proxy (sensory dissonance = the "gnarl" of a distorted
+// growl): strength of amplitude modulation in the 15-150 Hz band of the growl
+// region's envelope, relative to the carrier. Rises with detuned/distorted
+// bass; band energy can't see it. Used to auto-tune the bass drive.
+inline float measureRoughness(const StereoBuffer& b, double fs) {
+    const size_t n = b.size(); if (n == 0) return 0.0f;
+    Biquad hp = makeHighpass(fs, 120.0), lp = makeLowpass(fs, 2500.0);
+    Biquad mHp = makeHighpass(fs, 15.0), mLp = makeLowpass(fs, 150.0);
+    const float envC = std::exp(-1.0f / (0.002f * float(fs)));   // ~2 ms envelope follower
+    float env = 0.0f; double modE = 0.0, car = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        float x = lp.process(hp.process(0.5f * (b.l[i] + b.r[i])));
+        float e = std::fabs(x);
+        env = envC * env + (1.0f - envC) * e;
+        float m = mLp.process(mHp.process(env));
+        modE += double(m) * m; car += double(env) * env;
+    }
+    return float(std::sqrt(modE / (car + 1e-12)));
+}
+
 // Mono-safe stereo widener: derives NEW side content from the mid via all-pass
 // phase-scrambling (a decorrelated copy), high-passed so the lows stay mono and
 // punchy. Because it is injected as pure side (L += x, R -= x), it cancels

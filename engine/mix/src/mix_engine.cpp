@@ -313,6 +313,25 @@ StereoBuffer mixDown(const std::array<StereoBuffer, kLaneCount>& laneAudio,
         // growl's sustained harmonics into a dense, present WALL so the mid/
         // presence lane the references sit in (5-14%) actually reads.
         ottLite(bassBus, sr, 120.0, 2500.0, 0.34 + 0.22 * plan.mixAggression);  // lighter: let transients punch (crest was ~3.5)
+
+        // PERCEPTUAL ROUGHNESS feedback: measure the growl's gnarl (amplitude
+        // modulation 15-150 Hz) and, if a seed came out under-aggressive, add a
+        // gentle bounded extra drive so the perceived aggression stays on target
+        // across seeds. Only boosts (never softens a hard growl). Riddim only.
+        if (!trap) {
+            const float rough = measureRoughness(bassBus, sr);
+            // Safety net only: roughness is really a synth-time property and
+            // already matches the references for normal seeds (~1200 vs Seleman
+            // 1256). Fire only for genuinely UNDER-aggressive outliers so good
+            // seeds are untouched; the boost is gentle and bounded.
+            const float roughFloor = 0.20f;    // below this = under-aggressive outlier
+            if (rough < roughFloor) {
+                const float extra = std::clamp((roughFloor / std::max(0.05f, rough) - 1.0f) * 1.2f, 0.0f, 1.0f);
+                driveAboveClean(bassBus, sr, 300.0, 1.0 + extra);
+            }
+            if (std::getenv("RTG_MIX_DEBUG"))
+                std::fprintf(stderr, "[mix] bass roughness=%.3f (floor %.2f)\n", rough, roughFloor);
+        }
         applyWidth(bassBus, 0.28f);   // moderate spread (source growl now carries real stereo)
         stereoWiden(bassBus, sr, 0.85f, 220.0f); // mono-safe decorrelation: the distorted growl
                                                  // correlates the channels toward mono; inject
