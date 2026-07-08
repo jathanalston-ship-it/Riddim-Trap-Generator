@@ -76,31 +76,43 @@ Recipe makeGrowlRecipe(float aggr, float dark, float nov, Rng& rng) {
     p["wsMix"]        = clampf(0.15f + aggr * 0.18f + rng.rangef(-0.04f, 0.06f), 0.0f, 0.6f); // tanh-leaning: ODD harmonics (square)
     p["dirtyDrive"]   = 2.0f + aggr * 2.8f + rng.rangef(-0.2f, 0.3f);  // 2nd serial tanh drive
     p["dirtyMix"]     = clampf(0.12f + aggr * 0.45f + rng.rangef(-0.03f, 0.08f), 0.0f, 0.75f); // dirtier w/ aggr
-    // --- formant / vowel bank: TALK STRIPPED (minimal static color, low mix) ---
-    // Vowel path still drawn for determinism, but morph movement is disabled and
-    // the formant is blended in only faintly so the chug stays a static square.
+    // --- formant / vowel bank: CONTROLLED TALK (the moving formant that makes a
+    // growl sound alive). A prior pass stripped this to a static square because
+    // its movement went "watery" — but the watery culprit was the swept COMB
+    // (kept off below), not vowel formants. Perceptual A/B (tools/earview/
+    // growlscope.py) vs the references showed our chug read STATIC/buzzy while
+    // real growls have a low-mid formant that sweeps within each note. So the
+    // vowel formant is now audible (mix ~0.3) and MORPHS between vowels
+    // (morphMod), giving smooth vocal movement — moderate Q so it colours rather
+    // than whistles, no octave-up scream. Still a punchy stab, now with a voice.
     float v0, v1, v2; pickVowelPath(rng, v0, v1, v2);
     p["vowel0"] = v0; p["vowel1"] = v1; p["vowel2"] = v2;
-    p["formantQ"]     = rng.rangef(4.0f, 8.0f);
-    p["formantMix"]   = rng.rangef(0.05f, 0.15f);   // minimal — NO vocal talk
-    p["formantGain"]  = rng.rangef(1.4f, 2.2f);
+    p["formantQ"]     = rng.rangef(3.5f, 6.5f);     // smooth colour, not a resonant whistle
+    p["formantMix"]   = rng.rangef(0.20f, 0.34f);   // AUDIBLE vocal formant, body still leads (was ~0.1, static)
+    p["formantGain"]  = rng.rangef(1.6f, 2.6f);
     p["formantShift"] = clampf(rng.rangef(1.0f, 1.15f), 0.95f, 1.25f); // no octave-up scream
-    p["morphBase"]    = rng.rangef(0.1f, 0.4f);
-    p["morphMod"]     = rng.rangef(0.0f, 0.08f);    // ~0: no talk morph movement
-    // --- rhythmic modulation: vowel/LFO movement disabled (static per hit) ---
-    p["lfoRate"]      = rng.rangef(1.0f, 4.0f);
-    p["lfoDepth"]     = rng.rangef(0.0f, 0.06f);    // ~0: no wobble
+    p["morphBase"]    = rng.rangef(0.15f, 0.45f);
+    p["morphMod"]     = rng.rangef(0.18f, 0.40f);   // vowel MORPHS across the note -> talk
+    // --- rhythmic modulation: FASTER formant flutter so the sweep is audible
+    // WITHIN each short chug note (a 2 Hz LFO barely moves over a ~100 ms stab;
+    // 4-9 Hz sweeps the formant across the note -> the diagonal "talk" the
+    // references have). Depth kept controlled so it stays vocal, not watery. ---
+    p["lfoRate"]      = rng.rangef(3.5f, 6.5f);     // sweeps within a ~100ms stab, not a robotic flutter
+    p["lfoDepth"]     = rng.rangef(0.12f, 0.22f);   // audible within-note sweep (was ~0)
     p["lfoShape"]     = float(rng.intRange(0, 5));
     p["lfoSteps"]     = float(rng.intRange(2, 8));
     // --- body filter ---
-    p["lpMul"]        = rng.rangef(8.0f, 14.0f) - dark * 2.0f;   // bright scream body
+    p["lpMul"]        = rng.rangef(7.0f, 12.0f) - dark * 2.0f;   // bright body, a touch tamer
     p["lpQ"]          = rng.rangef(0.7f, 1.4f);
     // --- output EQ / glue: HP keeps the SUB owning the lows; mid-focused chug ---
     // The tonal chug sits ~150 Hz-2 kHz; HP at 120-150 cedes everything below to
-    // the sub lane. Mid peak centred lower (700-1400 Hz) for a punchy chug body.
+    // the sub lane. Perceptual A/B showed our growl's dominant formant sat too
+    // HIGH (~900 Hz) vs the references (~330-750 Hz) — thin/buzzy, not chunky. So
+    // the body peak is centred LOWER (500-900 Hz) for real low-mid growl weight,
+    // while the high shelf keeps the bright harmonics the references also have.
     p["hpFreq"]       = rng.rangef(120.0f, 150.0f);
-    p["midGainDb"]    = rng.rangef(3.0f, 6.0f) + aggr * 1.5f;
-    p["midFreq"]      = rng.rangef(700.0f, 1400.0f);          // mid-focused chug body
+    p["midGainDb"]    = rng.rangef(3.5f, 6.5f) + aggr * 1.5f;   // a touch more body
+    p["midFreq"]      = rng.rangef(500.0f, 900.0f);            // LOWER low-mid chug body
     p["highShelfDb"]  = 4.5f - dark * 3.0f;   // air/presence on the growl top
     p["ottAmt"]       = rng.rangef(0.1f, 0.3f);
     // --- movement polish: phaser DISABLED (static chug) ---
@@ -110,8 +122,8 @@ Recipe makeGrowlRecipe(float aggr, float dark, float nov, Rng& rng) {
     // --- PUNCHY STAB amp env: fast attack, SHORT decay to a low tail, short release.
     // Each note is a percussive chug that DIES QUICKLY (not a sustained wub).
     p["ampAtk"]       = clampf(0.002f - aggr * 0.0012f + rng.rangef(-0.0003f, 0.0008f), 0.0006f, 0.004f);
-    p["ampDec"]       = rng.rangef(0.06f, 0.13f);             // a bit longer: body, not just a click
-    p["ampSus"]       = clampf(0.28f + aggr * 0.06f + rng.rangef(-0.03f, 0.05f), 0.15f, 0.42f); // sustained bright body so the scream carries mid RMS, still dies within the note (chug)
+    p["ampDec"]       = rng.rangef(0.08f, 0.16f);             // longer body so the formant sweep is audible
+    p["ampSus"]       = clampf(0.36f + aggr * 0.06f + rng.rangef(-0.03f, 0.05f), 0.22f, 0.52f); // more sustain -> the moving formant has room to talk, still dies within the note (chug)
     p["ampRel"]       = rng.rangef(0.01f, 0.03f);
     p["gain"]         = 0.62f;
     // --- wavefolder: MODERATE, keeps the square tonal (odd-dominant), not a scream ---
