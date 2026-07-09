@@ -114,11 +114,18 @@ StereoBuffer renderKick(const Recipe& rc, const Voice& v) {
     // and smeared/boomed. So the tom body is a short, punchy decay (~a bit longer
     // than the kick body for pitch, but nowhere near a ring).
     const bool tomMode = (double(v.freqHz) > 80.0);
-    const float effDropSemis = tomMode ? std::min(pitchDropSemis, 3.0f) : pitchDropSemis;
-    const float effBodyDecay = tomMode ? std::clamp(bodyDecay * 1.3f + 0.012f, 0.035f, 0.07f)
+    // Tuned toms must read IN TUNE. The old 3-semitone glide left the note heard
+    // mid-bend — the loud attack sits sharp and only settles as it fades, which
+    // the ear reads as detuned/wonky (and the +3 st overshoot scattered pitches
+    // up to ~400 Hz). Keep the glide tiny (~1 st) so the tom lands on its note
+    // immediately, give the body a little more tail so the settled fundamental
+    // actually rings (still tight/punchy, not a boom), and pull the beater click
+    // back so the tuned pitch reads over the noise instead of sounding clicky.
+    const float effDropSemis = tomMode ? std::min(pitchDropSemis, 1.0f) : pitchDropSemis;
+    const float effBodyDecay = tomMode ? std::clamp(bodyDecay * 1.5f + 0.022f, 0.05f, 0.09f)
                                        : bodyDecay;
-    const float effClickAmt  = tomMode ? clickAmt * 0.4f : clickAmt;      // less beater click
-    const float effClickAmount = tomMode ? clickAmount * 0.4f : clickAmount;
+    const float effClickAmt  = tomMode ? clickAmt * 0.28f : clickAmt;     // less beater click -> pitch reads
+    const float effClickAmount = tomMode ? clickAmount * 0.28f : clickAmount;
 
     // Pitch envelope: instantaneous freq = root * 2^((dropSemis * exp(-t/tau))/12).
     // Starts +dropSemis above root and falls exponentially to root — the fast
