@@ -16,3 +16,10 @@ __pycache__/
 # Generated audio (Rule 7: never commit generated audio). rtg_cli's default
 # output is rtg_track.wav in the CWD; smoke renders land as *.wav too.
 *.wav
+
+# Knowledge Store databases (tools/knowledge). These are ACCUMULATED DATA, not
+# source — the default lives under rtg_library/ (already ignored); this catches
+# any store pointed elsewhere via $RTG_KNOWLEDGE_DB.
+*.db
+*.sqlite
+*.sqlite3

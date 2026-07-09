@@ -182,12 +182,67 @@ def cmd_nearest(a):
     for sim,nm in sorted(scores,reverse=True):
         print(f"  {sim:4.0f}/100  {nm}")
 
+# ------------------------------------------------------------------ knowledge store
+# Optional: persist every measurement into the RTG Knowledge Store so it is never
+# thrown away and future analyzers can consume it. OFF unless --record is passed;
+# without it, ears.py behaves byte-for-byte as before.
+KVER = "ears.py/1"
+
+def _record_features(path, F, opts):
+    _kdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'knowledge')
+    sys.path.insert(0, os.path.normpath(_kdir))
+    try:
+        from kstore import KnowledgeStore
+    except Exception as e:
+        print(f"  [record skipped: knowledge store unavailable: {e}]"); return
+    kind = opts.get('kind') or 'render'
+    with KnowledgeStore(opts.get('db')) as ks:
+        name = opts.get('subject') or os.path.basename(path)
+        sid = (ks.subject(kind, name) if opts.get('subject')
+               else ks.subject_for_file(path, kind))
+        ks.record(sid, "loudness.integrated_lufs", float(F['loudness']), unit="LUFS",
+                  window="drop", tool="ears.py", tool_version=KVER, method="BS.1770 K-weighted")
+        ks.record(sid, "roughness.am_gnarl", float(F['roughness']),
+                  window="drop", tool="ears.py", tool_version=KVER, method="15-150Hz AM energy")
+        ks.record(sid, "sharpness.zwicker_acum", float(F['sharpness']), unit="acum",
+                  window="drop", tool="ears.py", tool_version=KVER, method="Zwicker 24-band")
+        ks.record(sid, "bark.spectrum", vector=[float(v) for v in F['bark']],
+                  window="drop", tool="ears.py", tool_version=KVER, method="24 critical bands")
+        ks.record(sid, "mfcc.timbre", vector=[float(v) for v in F['mfcc']],
+                  window="drop", tool="ears.py", tool_version=KVER, method="13-coeff timbre envelope")
+        print(f"  [recorded 5 measurements -> subject #{sid} '{name}' in {ks.path}]")
+
+def _split_opts(a):
+    """Pull --record/--db/--kind/--subject flags out of a positional arg list.
+    Returns (positional_args, opts_dict). No flags -> opts['record'] is False."""
+    pos, opts = [], {'record': False, 'db': None, 'kind': None, 'subject': None}
+    i = 0
+    while i < len(a):
+        t = a[i]
+        if t == '--record': opts['record'] = True; i += 1
+        elif t == '--db': opts['db'] = a[i+1]; i += 2
+        elif t == '--kind': opts['kind'] = a[i+1]; i += 2
+        elif t == '--subject': opts['subject'] = a[i+1]; i += 2
+        else: pos.append(t); i += 1
+    return pos, opts
+
 def main():
     if len(sys.argv)<3:
-        print("usage: ears.py ears|describe <wav> [bpm] | dist <a> <b> [bpm] | nearest <wav> <refdir> [bpm]"); return
+        print("usage: ears.py ears|describe <wav> [bpm] | dist <a> <b> [bpm] | nearest <wav> <refdir> [bpm]")
+        print("       add --record [--db PATH] [--kind reference|render|stem] [--subject NAME] to persist"); return
     c=sys.argv[1]
-    if c=='ears': cmd_ears(sys.argv[2:])
-    elif c=='dist': cmd_dist(sys.argv[2:])
-    elif c=='describe': cmd_describe(sys.argv[2:])
-    elif c=='nearest': cmd_nearest(sys.argv[2:])
+    args, opts = _split_opts(sys.argv[2:])
+    if c=='ears':
+        cmd_ears(args)
+        if opts['record']:
+            x,sr=load(args[0]); F=features(x,sr, float(args[1]) if len(args)>1 else 145.0)
+            _record_features(args[0], F, opts)
+    elif c=='dist':
+        cmd_dist(args)
+        if opts['record']:
+            bpm=float(args[2]) if len(args)>2 else 145.0
+            for p in (args[0], args[1]):
+                x,sr=load(p); _record_features(p, features(x,sr,bpm), opts)
+    elif c=='describe': cmd_describe(args)
+    elif c=='nearest': cmd_nearest(args)
 main()
